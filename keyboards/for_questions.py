@@ -141,6 +141,16 @@ def get_yes_no_keyboard(prefix: str = "yn") -> InlineKeyboardMarkup:
     )
 
 
+def get_short_assessment_keyboard(options: list[tuple[str, str]], prefix: str) -> InlineKeyboardMarkup:
+    """Inline keyboard for short assessment questions."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=text, callback_data=f"{prefix}_{key}")]
+            for key, text in options
+        ]
+    )
+
+
 def get_contact_request_keyboard() -> ReplyKeyboardMarkup:
     """Return keyboard with built-in Telegram contact sharing button."""
     return ReplyKeyboardMarkup(
@@ -162,7 +172,8 @@ def get_manager_panel_keyboard() -> ReplyKeyboardMarkup:
             [KeyboardButton(text="🔎 Поиск по имени")],
             [KeyboardButton(text="📤 Экспорт CSV")],
             [KeyboardButton(text="✉️ Отправить сообщение")],
-            [KeyboardButton(text="quit")],
+            [KeyboardButton(text="📄 Открыть Google таблицу")],
+            [KeyboardButton(text="🚪 Выйти из панели менеджера")],
         ],
         resize_keyboard=True,
     )

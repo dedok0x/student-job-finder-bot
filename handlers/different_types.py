@@ -6,7 +6,7 @@ from aiogram import Router, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import FSInputFile, Message, ReplyKeyboardRemove
+from aiogram.types import CallbackQuery, FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup, Message, ReplyKeyboardRemove
 
 from database import (
     get_all_candidates,
@@ -20,10 +20,11 @@ from database import (
     update_candidate_status,
 )
 from keyboards.for_questions import get_manager_panel_keyboard
+from sheets_sync import GOOGLE_SHEETS_URL, get_last_sheets_error, sync_candidates_to_sheets
 
 router = Router()
 
-MANAGER_AUTH_CODE = "315920"
+MANAGER_AUTH_CODE = os.getenv("MANAGER_AUTH_CODE")
 AUTHORIZED_MANAGERS: set[int] = set()
 
 
@@ -50,6 +51,14 @@ def format_candidate_short(candidate: dict) -> str:
         f"Статус: {candidate.get('status', '')}\n"
         f"Балл: {candidate.get('score', 0)}"
     )
+
+
+def format_candidate_with_tg(candidate: dict) -> str:
+    username = (candidate.get("username") or "").strip()
+    tg_user_id = candidate.get("tg_user_id")
+    tg_link = f"https://t.me/{username}" if username else (f"tg://user?id={tg_user_id}" if tg_user_id else "не указана")
+    base = format_candidate_short(candidate)
+    return f"{base}\nTelegram: {tg_link}"
 
 
 async def send_message_to_candidate(message: Message, candidate: dict, text: str) -> bool:
@@ -81,7 +90,7 @@ async def quit_manager_panel(message: Message, state: FSMContext):
         return
     AUTHORIZED_MANAGERS.discard(message.from_user.id)
     await state.clear()
-    await message.answer("Вы вышли из панели менеджера.", reply_markup=ReplyKeyboardRemove())
+    await message.answer("Вы вышли из панели менеджера. Для продолжения напишите /start", reply_markup=ReplyKeyboardRemove())
 
 
 @router.message(Command("quit"))
@@ -90,7 +99,16 @@ async def quit_manager_panel_command(message: Message, state: FSMContext):
         return
     AUTHORIZED_MANAGERS.discard(message.from_user.id)
     await state.clear()
-    await message.answer("Вы вышли из панели менеджера.", reply_markup=ReplyKeyboardRemove())
+    await message.answer("Вы вышли из панели менеджера. Для продолжения напишите /start", reply_markup=ReplyKeyboardRemove())
+
+
+@router.message(F.text == "🚪 Выйти из панели менеджера")
+async def quit_manager_panel_button(message: Message, state: FSMContext):
+    if not is_manager(message):
+        return
+    AUTHORIZED_MANAGERS.discard(message.from_user.id)
+    await state.clear()
+    await message.answer("Вы вышли из панели менеджера. Для продолжения напишите /start", reply_markup=ReplyKeyboardRemove())
 
 
 @router.message(F.text == "👥 Последние кандидаты")
@@ -162,6 +180,35 @@ async def manager_process_name_search(message: Message, state: FSMContext):
     response = "\n\n".join([format_candidate_short(c) for c in results])
     await message.answer(f"🔎 Результаты поиска:\n\n{response}", reply_markup=get_manager_panel_keyboard())
 
+    for candidate in results[:5]:
+        candidate_id = candidate.get("id")
+        if not candidate_id:
+            continue
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="✉️ Написать через бота", callback_data=f"msg_candidate_{candidate_id}")]
+            ]
+        )
+        await message.answer(format_candidate_with_tg(candidate), reply_markup=kb)
+
+
+@router.callback_query(F.data.startswith("msg_candidate_"))
+async def manager_message_from_search(callback: CallbackQuery, state: FSMContext):
+    if not callback.message or not callback.from_user or callback.from_user.id not in AUTHORIZED_MANAGERS:
+        await callback.answer("Недостаточно прав", show_alert=True)
+        return
+
+    try:
+        candidate_id = int((callback.data or "").replace("msg_candidate_", ""))
+    except ValueError:
+        await callback.answer("Некорректный кандидат", show_alert=True)
+        return
+
+    await state.update_data(target_candidate_id=candidate_id)
+    await state.set_state(ManagerPanelState.wait_message_text)
+    await callback.message.answer(f"Введи сообщение для кандидата ID {candidate_id}.")
+    await callback.answer()
+
 
 @router.message(F.text == "📤 Экспорт CSV")
 async def manager_export_csv(message: Message):
@@ -188,6 +235,32 @@ async def manager_start_send_message(message: Message, state: FSMContext):
         return
     await state.set_state(ManagerPanelState.wait_message_target)
     await message.answer("Введи ID кандидата, которому нужно отправить сообщение.")
+
+
+@router.message(F.text == "📄 Открыть Google таблицу")
+async def manager_open_google_sheet(message: Message):
+    if not is_manager(message):
+        return
+
+    # Синхронизация при открытии менеджером, чтобы ссылка всегда вела на актуальные данные
+    candidates = get_all_candidates()
+    synced = sync_candidates_to_sheets(candidates)
+
+    sync_text = "Данные синхронизированы." if synced else "Таблица подключена, но синхронизация не выполнена (проверь доступы)."
+    if not synced:
+        details = get_last_sheets_error()
+        suffix = f"\nПричина: {details}" if details else ""
+        await message.answer(
+            "Не удалось синхронизировать Google таблицу."
+            f"{suffix}\nСсылка:\n{GOOGLE_SHEETS_URL}"
+        )
+        return
+
+    await message.answer(
+        f"✅ Google таблица подключена.\n{sync_text}\n"
+        f"Записано строк: {len(candidates)}\n"
+        f"Ссылка:\n{GOOGLE_SHEETS_URL}"
+    )
 
 
 @router.message(ManagerPanelState.wait_message_target)

@@ -7,6 +7,21 @@ from rapidfuzz import fuzz
 DB_NAME = 'hr_bot.db'
 
 
+def _sync_snapshot_to_sheets(conn: sqlite3.Connection) -> None:
+    """Push current candidates snapshot to Google Sheets (best effort)."""
+    try:
+        from sheets_sync import sync_candidates_to_sheets
+
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM candidates ORDER BY id DESC')
+        rows = cursor.fetchall()
+        sync_candidates_to_sheets([dict(row) for row in rows])
+    except Exception:
+        # sync is optional and should never break core DB writes
+        pass
+
+
 def _ensure_column(cursor: sqlite3.Cursor, table: str, column: str, definition: str) -> None:
     """Add a column to table if it does not exist."""
     cursor.execute(f"PRAGMA table_info({table})")
@@ -41,6 +56,10 @@ def init_db():
             resume_message_link TEXT,
             test_answers TEXT,
             work_style TEXT,
+            multi_task_style TEXT,
+            unknown_task_action TEXT,
+            work_preference TEXT,
+            work_start_priority TEXT,
             contacts TEXT,
             score INTEGER DEFAULT 0,
             tags TEXT,
@@ -82,6 +101,7 @@ def init_db():
             FOREIGN KEY (vacancy_id) REFERENCES vacancies (id)
         )
     ''')
+
     
     _ensure_column(cursor, 'candidates', 'tg_user_id', 'INTEGER')
     _ensure_column(cursor, 'candidates', 'tg_chat_id', 'INTEGER')
@@ -90,6 +110,10 @@ def init_db():
     _ensure_column(cursor, 'candidates', 'resume_file_id', 'TEXT')
     _ensure_column(cursor, 'candidates', 'resume_message_link', 'TEXT')
     _ensure_column(cursor, 'candidates', 'additional_info', 'TEXT')
+    _ensure_column(cursor, 'candidates', 'multi_task_style', 'TEXT')
+    _ensure_column(cursor, 'candidates', 'unknown_task_action', 'TEXT')
+    _ensure_column(cursor, 'candidates', 'work_preference', 'TEXT')
+    _ensure_column(cursor, 'candidates', 'work_start_priority', 'TEXT')
 
     conn.commit()
     conn.close()
@@ -103,9 +127,11 @@ def save_candidate(data: Dict[str, Any]) -> int:
         INSERT INTO candidates (
             tg_user_id, tg_chat_id, timestamp, username, candidate_name, first_name, last_name, age,
             who_are_you, what_are_you_looking_for, direction, experience, skills, resume_links,
-            resume_file_id, resume_message_link, test_answers, work_style, contacts,
+            resume_file_id, resume_message_link, test_answers, work_style,
+            multi_task_style, unknown_task_action, work_preference, work_start_priority,
+            contacts,
             clarifying_answers, salary_expectations, additional_info, status, score, tags, level
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ''', (
         data.get('tg_user_id'),
         data.get('tg_chat_id'),
@@ -125,6 +151,10 @@ def save_candidate(data: Dict[str, Any]) -> int:
         data.get('resume_message_link', ''),
         data.get('test_answers', ''),
         data.get('work_style', ''),
+        data.get('multi_task_style', ''),
+        data.get('unknown_task_action', ''),
+        data.get('work_preference', ''),
+        data.get('work_start_priority', ''),
         data.get('contacts', ''),
         data.get('clarifying_answers', ''),
         data.get('salary_expectations', ''),
@@ -137,6 +167,7 @@ def save_candidate(data: Dict[str, Any]) -> int:
     
     candidate_id = cursor.lastrowid
     conn.commit()
+    _sync_snapshot_to_sheets(conn)
     conn.close()
     return candidate_id
 
@@ -227,6 +258,7 @@ def update_latest_candidate_resume(
         (resume_links, resume_file_id, resume_message_link, tg_user_id, tg_chat_id),
     )
     conn.commit()
+    _sync_snapshot_to_sheets(conn)
     updated = cursor.rowcount > 0
     conn.close()
     return updated
@@ -308,6 +340,7 @@ def update_candidate_status(candidate_id: int, new_status: str, notes: str = '')
     ''', (new_status, notes, candidate_id))
     
     conn.commit()
+    _sync_snapshot_to_sheets(conn)
     updated = cursor.rowcount > 0
     conn.close()
     return updated
@@ -324,6 +357,7 @@ def update_candidate_score(candidate_id: int, score: int, tags: str, level: str)
     ''', (score, tags, level, candidate_id))
     
     conn.commit()
+    _sync_snapshot_to_sheets(conn)
     updated = cursor.rowcount > 0
     conn.close()
     return updated

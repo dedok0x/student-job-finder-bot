@@ -20,6 +20,7 @@ from keyboards.for_questions import (
     get_contact_request_keyboard,
     get_direction_keyboard,
     get_experience_keyboard,
+    get_short_assessment_keyboard,
     get_skills_keyboard,
     get_test_questions_keyboard,
     get_who_are_you_keyboard,
@@ -46,6 +47,7 @@ class Questionnaire(StatesGroup):
     add_more_text = State()
     test_questions = State()
     work_style = State()
+    short_assessment = State()
     contacts = State()
     menu_upload_resume = State()
 
@@ -92,6 +94,49 @@ WORK_STYLE_MAP = {
     "try_myself_first": "сначала сам разбираюсь, потом задаю вопросы",
     "wait_for_clarification": "откладываю и жду дополнительных пояснений",
 }
+
+SHORT_ASSESSMENT = [
+    {
+        "key": "multi_task_style",
+        "question": "Если у тебя много мелких задач одновременно, как ты обычно действуешь?",
+        "options": [
+            ("prioritize_record", "записываю и расставляю по приоритету"),
+            ("urgent_first", "делаю по очереди то, что срочнее"),
+            ("easy_first", "беру то, что кажется проще"),
+            ("confused_no_list", "могу запутаться без четкого списка"),
+        ],
+    },
+    {
+        "key": "unknown_task_action",
+        "question": "Если ты не знаешь, как сделать задачу, что ты делаешь?",
+        "options": [
+            ("search_self", "ищу информацию сам"),
+            ("ask_colleague", "спрашиваю коллегу или руководителя"),
+            ("try_variants", "пробую несколько вариантов"),
+            ("wait_instruction", "жду более подробную инструкцию"),
+        ],
+    },
+    {
+        "key": "work_preference",
+        "question": "Что тебе ближе в работе?",
+        "options": [
+            ("clear_tasks", "четкие задачи и понятный порядок"),
+            ("switch_tasks", "разные задачи и переключение"),
+            ("communication", "общение с людьми"),
+            ("data_text_tables", "работа с данными, текстами или таблицами"),
+        ],
+    },
+    {
+        "key": "work_start_priority",
+        "question": "Что для тебя важнее в начале работы?",
+        "options": [
+            ("speed", "сделать быстро"),
+            ("accuracy", "сделать аккуратно"),
+            ("clarify_first", "сначала все уточнить"),
+            ("example_first", "сначала посмотреть пример"),
+        ],
+    },
+]
 
 TEST_QUESTIONS_BY_DIRECTION = {
     "информационные технологии": [
@@ -156,6 +201,15 @@ SKILL_CLARIFY_DIRECTION_HINTS = {
 EMAIL_REGEX = re.compile(r"(?i)^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$")
 PHONE_REGEX = re.compile(r"^(?:\+7|7|8)?[\s\-()]*\d(?:[\s\-()]*\d){9,10}$")
 GREETING_WORDS = {"привет", "здарова", "здравствуйте", "добрый", "хай", "чё", "че", "как", "hello", "hi"}
+MANAGER_MENU_TEXTS = {
+    "👥 Последние кандидаты",
+    "📊 Общая статистика",
+    "🔎 Поиск по имени",
+    "📤 Экспорт CSV",
+    "✉️ Отправить сообщение",
+    "📄 Открыть Google таблицу",
+    "🚪 Выйти из панели менеджера"
+}
 
 
 def is_greeting_or_generic(text: str) -> bool:
@@ -208,8 +262,7 @@ async def ask_first_question(message: Message, state: FSMContext) -> None:
     await state.set_state(Questionnaire.candidate_name)
     await message.answer(
         "👋 Привет! Я помогу быстро собрать анкету для подбора вакансий.\n"
-        "Сначала познакомимся.\n\n"
-        "1️⃣ Как тебя зовут?",
+        "1️⃣ Введи ниже своё ФИО.",
         reply_markup=ReplyKeyboardRemove(),
     )
 
@@ -586,6 +639,42 @@ async def process_work_style(callback: CallbackQuery, state: FSMContext):
         return
 
     await state.update_data(work_style=WORK_STYLE_MAP.get(data[6:], data[6:]))
+    await state.update_data(short_assessment_index=0)
+    await state.set_state(Questionnaire.short_assessment)
+    first = SHORT_ASSESSMENT[0]
+    await callback.message.answer(
+        first["question"],
+        reply_markup=get_short_assessment_keyboard(first["options"], prefix="sa0"),
+    )
+    await callback.answer()
+
+
+@router.callback_query(Questionnaire.short_assessment)
+async def process_short_assessment(callback: CallbackQuery, state: FSMContext):
+    payload = callback.data or ""
+    state_data = await state.get_data()
+    index = int(state_data.get("short_assessment_index", 0))
+
+    if not payload.startswith(f"sa{index}_"):
+        await callback.answer("Выбери один из вариантов", show_alert=True)
+        return
+
+    selected_key = payload.replace(f"sa{index}_", "", 1)
+    cfg = SHORT_ASSESSMENT[index]
+    selected_text = next((text for key, text in cfg["options"] if key == selected_key), "")
+    await state.update_data(**{cfg["key"]: selected_text})
+
+    next_index = index + 1
+    if next_index < len(SHORT_ASSESSMENT):
+        next_cfg = SHORT_ASSESSMENT[next_index]
+        await state.update_data(short_assessment_index=next_index)
+        await callback.message.answer(
+            next_cfg["question"],
+            reply_markup=get_short_assessment_keyboard(next_cfg["options"], prefix=f"sa{next_index}"),
+        )
+        await callback.answer()
+        return
+
     await state.set_state(Questionnaire.contacts)
     await state.update_data(contact_step="email")
     await callback.message.answer("1️⃣2️⃣ Контакты\nШаг 1/2: укажи email")
@@ -753,4 +842,14 @@ def calculate_score_and_tags(data: Dict[str, Any]) -> tuple[int, str, str]:
 @router.message(StateFilter(None), ~F.text.startswith("/"), lambda m: is_greeting_or_generic((m.text or "").strip()))
 async def fallback_entrypoint(message: Message, state: FSMContext):
     await start_flow_or_menu(message, state)
+
+
+@router.message(
+    StateFilter(None),
+    ~F.text.startswith("/"),
+    lambda m: (m.text or "").strip() not in MANAGER_MENU_TEXTS,
+    lambda m: not is_greeting_or_generic((m.text or "").strip()),
+)
+async def fallback_start_hint(message: Message):
+    await message.answer("Для продолжения напишите /start")
 
