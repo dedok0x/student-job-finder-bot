@@ -171,7 +171,6 @@ def get_manager_panel_keyboard() -> ReplyKeyboardMarkup:
             [KeyboardButton(text="📊 Общая статистика")],
             [KeyboardButton(text="🔎 Поиск по имени")],
             [KeyboardButton(text="📤 Экспорт CSV")],
-            [KeyboardButton(text="✉️ Отправить сообщение")],
             [KeyboardButton(text="📄 Открыть Google таблицу")],
             [KeyboardButton(text="🚪 Выйти из панели менеджера")],
         ],

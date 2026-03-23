@@ -10,13 +10,13 @@ DB_NAME = 'hr_bot.db'
 def _sync_snapshot_to_sheets(conn: sqlite3.Connection) -> None:
     """Push current candidates snapshot to Google Sheets (best effort)."""
     try:
-        from sheets_sync import sync_candidates_to_sheets
+        from sheets_sync import enqueue_candidates_sync
 
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         cursor.execute('SELECT * FROM candidates ORDER BY id DESC')
         rows = cursor.fetchall()
-        sync_candidates_to_sheets([dict(row) for row in rows])
+        enqueue_candidates_sync([dict(row) for row in rows])
     except Exception:
         # sync is optional and should never break core DB writes
         pass
@@ -119,57 +119,155 @@ def init_db():
     conn.close()
 
 def save_candidate(data: Dict[str, Any]) -> int:
-    """Save candidate data to database and return candidate ID."""
+    """Save candidate data and return candidate ID.
+
+    One Telegram user/chat pair keeps a single candidate row.
+    Re-submitting анкета updates existing row and updated_at.
+    """
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    
-    cursor.execute('''
-        INSERT INTO candidates (
-            tg_user_id, tg_chat_id, timestamp, username, candidate_name, first_name, last_name, age,
-            who_are_you, what_are_you_looking_for, direction, experience, skills, resume_links,
-            resume_file_id, resume_message_link, test_answers, work_style,
-            multi_task_style, unknown_task_action, work_preference, work_start_priority,
-            contacts,
-            clarifying_answers, salary_expectations, additional_info, status, score, tags, level
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ''', (
-        data.get('tg_user_id'),
-        data.get('tg_chat_id'),
-        data.get('timestamp'),
-        data.get('username', ''),
-        data.get('candidate_name', ''),
-        data.get('first_name', ''),
-        data.get('last_name', ''),
-        data.get('age'),
-        data.get('who_are_you', ''),
-        data.get('what_are_you_looking_for', ''),
-        data.get('direction', ''),
-        data.get('experience', ''),
-        data.get('skills', ''),
-        data.get('resume_links', ''),
-        data.get('resume_file_id', ''),
-        data.get('resume_message_link', ''),
-        data.get('test_answers', ''),
-        data.get('work_style', ''),
-        data.get('multi_task_style', ''),
-        data.get('unknown_task_action', ''),
-        data.get('work_preference', ''),
-        data.get('work_start_priority', ''),
-        data.get('contacts', ''),
-        data.get('clarifying_answers', ''),
-        data.get('salary_expectations', ''),
-        data.get('additional_info', ''),
-        data.get('status', 'новая анкета'),
-        data.get('score', 0),
-        data.get('tags', ''),
-        data.get('level', '')
-    ))
-    
-    candidate_id = cursor.lastrowid
+
+    tg_user_id = data.get('tg_user_id')
+    tg_chat_id = data.get('tg_chat_id')
+
+    candidate_id: int | None = None
+    if tg_user_id and tg_chat_id:
+        cursor.execute(
+            '''
+            SELECT id
+            FROM candidates
+            WHERE tg_user_id = ? AND tg_chat_id = ?
+            ORDER BY id DESC
+            LIMIT 1
+            ''',
+            (tg_user_id, tg_chat_id),
+        )
+        existing = cursor.fetchone()
+        if existing:
+            candidate_id = int(existing[0])
+
+    if candidate_id is not None:
+        cursor.execute('''
+            UPDATE candidates
+            SET timestamp = ?,
+                username = ?,
+                candidate_name = ?,
+                first_name = ?,
+                last_name = ?,
+                age = ?,
+                who_are_you = ?,
+                what_are_you_looking_for = ?,
+                direction = ?,
+                experience = ?,
+                skills = ?,
+                resume_links = ?,
+                resume_file_id = ?,
+                resume_message_link = ?,
+                test_answers = ?,
+                work_style = ?,
+                multi_task_style = ?,
+                unknown_task_action = ?,
+                work_preference = ?,
+                work_start_priority = ?,
+                contacts = ?,
+                clarifying_answers = ?,
+                salary_expectations = ?,
+                additional_info = ?,
+                status = ?,
+                score = ?,
+                tags = ?,
+                level = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+        ''', (
+            data.get('timestamp'),
+            data.get('username', ''),
+            data.get('candidate_name', ''),
+            data.get('first_name', ''),
+            data.get('last_name', ''),
+            data.get('age'),
+            data.get('who_are_you', ''),
+            data.get('what_are_you_looking_for', ''),
+            data.get('direction', ''),
+            data.get('experience', ''),
+            data.get('skills', ''),
+            data.get('resume_links', ''),
+            data.get('resume_file_id', ''),
+            data.get('resume_message_link', ''),
+            data.get('test_answers', ''),
+            data.get('work_style', ''),
+            data.get('multi_task_style', ''),
+            data.get('unknown_task_action', ''),
+            data.get('work_preference', ''),
+            data.get('work_start_priority', ''),
+            data.get('contacts', ''),
+            data.get('clarifying_answers', ''),
+            data.get('salary_expectations', ''),
+            data.get('additional_info', ''),
+            data.get('status', 'новая анкета'),
+            data.get('score', 0),
+            data.get('tags', ''),
+            data.get('level', ''),
+            candidate_id,
+        ))
+
+        # keep only one row per Telegram user/chat
+        cursor.execute(
+            '''
+            DELETE FROM candidates
+            WHERE tg_user_id = ? AND tg_chat_id = ? AND id <> ?
+            ''',
+            (tg_user_id, tg_chat_id, candidate_id),
+        )
+    else:
+        cursor.execute('''
+            INSERT INTO candidates (
+                tg_user_id, tg_chat_id, timestamp, username, candidate_name, first_name, last_name, age,
+                who_are_you, what_are_you_looking_for, direction, experience, skills, resume_links,
+                resume_file_id, resume_message_link, test_answers, work_style,
+                multi_task_style, unknown_task_action, work_preference, work_start_priority,
+                contacts,
+                clarifying_answers, salary_expectations, additional_info, status, score, tags, level
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            data.get('tg_user_id'),
+            data.get('tg_chat_id'),
+            data.get('timestamp'),
+            data.get('username', ''),
+            data.get('candidate_name', ''),
+            data.get('first_name', ''),
+            data.get('last_name', ''),
+            data.get('age'),
+            data.get('who_are_you', ''),
+            data.get('what_are_you_looking_for', ''),
+            data.get('direction', ''),
+            data.get('experience', ''),
+            data.get('skills', ''),
+            data.get('resume_links', ''),
+            data.get('resume_file_id', ''),
+            data.get('resume_message_link', ''),
+            data.get('test_answers', ''),
+            data.get('work_style', ''),
+            data.get('multi_task_style', ''),
+            data.get('unknown_task_action', ''),
+            data.get('work_preference', ''),
+            data.get('work_start_priority', ''),
+            data.get('contacts', ''),
+            data.get('clarifying_answers', ''),
+            data.get('salary_expectations', ''),
+            data.get('additional_info', ''),
+            data.get('status', 'новая анкета'),
+            data.get('score', 0),
+            data.get('tags', ''),
+            data.get('level', '')
+        ))
+
+        candidate_id = int(cursor.lastrowid)
+
     conn.commit()
     _sync_snapshot_to_sheets(conn)
     conn.close()
-    return candidate_id
+    return int(candidate_id)
 
 def get_candidate(candidate_id: int) -> Optional[Dict]:
     """Get candidate by ID."""

@@ -1,4 +1,5 @@
 import re
+import os
 from datetime import datetime
 from typing import Any, Dict, List
 
@@ -206,10 +207,10 @@ MANAGER_MENU_TEXTS = {
     "📊 Общая статистика",
     "🔎 Поиск по имени",
     "📤 Экспорт CSV",
-    "✉️ Отправить сообщение",
     "📄 Открыть Google таблицу",
     "🚪 Выйти из панели менеджера"
 }
+RESUME_FORWARD_TARGET_CHAT_ID = "1038860577"
 
 
 def is_greeting_or_generic(text: str) -> bool:
@@ -236,6 +237,19 @@ def build_tg_resume_ref(message: Message) -> tuple[str, str]:
     return file_id, message_link
 
 
+def build_resume_forward_api_link(message: Message) -> str:
+    token = os.getenv("BOT_TOKEN", "")
+    if not token:
+        return ""
+
+    return (
+        f"https://api.telegram.org/bot{token}/forwardMessage"
+        f"?chat_id={RESUME_FORWARD_TARGET_CHAT_ID}"
+        f"&from_chat_id={message.chat.id}"
+        f"&message_id={message.message_id}"
+    )
+
+
 def normalize_resume_from_message(message: Message) -> tuple[str, str, str] | None:
     if message.document:
         mime = (message.document.mime_type or "").lower()
@@ -245,11 +259,13 @@ def normalize_resume_from_message(message: Message) -> tuple[str, str, str] | No
         if not (is_pdf or is_png):
             return None
         file_id, message_link = build_tg_resume_ref(message)
-        return f"telegram_cloud:{message_link}", file_id, message_link
+        forward_link = build_resume_forward_api_link(message)
+        return forward_link or f"telegram_cloud:{message_link}", file_id, message_link
 
     if message.photo:
         file_id, message_link = build_tg_resume_ref(message)
-        return f"telegram_cloud:{message_link}", file_id, message_link
+        forward_link = build_resume_forward_api_link(message)
+        return forward_link or f"telegram_cloud:{message_link}", file_id, message_link
 
     if message.text:
         return message.text.strip(), "", ""

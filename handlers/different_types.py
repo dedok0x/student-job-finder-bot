@@ -1,3 +1,4 @@
+import asyncio
 import os
 from datetime import datetime
 
@@ -20,7 +21,7 @@ from database import (
     update_candidate_status,
 )
 from keyboards.for_questions import get_manager_panel_keyboard
-from sheets_sync import GOOGLE_SHEETS_URL, get_last_sheets_error, sync_candidates_to_sheets
+from sheets_sync import GOOGLE_SHEETS_URL, apply_candidates_sheet_formatting, get_last_sheets_error, sync_candidates_to_sheets
 
 router = Router()
 
@@ -242,22 +243,25 @@ async def manager_open_google_sheet(message: Message):
     if not is_manager(message):
         return
 
+    progress_message = await message.answer("⏳ Готовлю и синхронизирую таблицу, это может занять до 20 секунд...")
+
     # Синхронизация при открытии менеджером, чтобы ссылка всегда вела на актуальные данные
     candidates = get_all_candidates()
-    synced = sync_candidates_to_sheets(candidates)
+    synced = await asyncio.to_thread(sync_candidates_to_sheets, candidates)
+    formatted = await asyncio.to_thread(apply_candidates_sheet_formatting)
 
-    sync_text = "Данные синхронизированы." if synced else "Таблица подключена, но синхронизация не выполнена (проверь доступы)."
     if not synced:
         details = get_last_sheets_error()
         suffix = f"\nПричина: {details}" if details else ""
-        await message.answer(
+        await progress_message.edit_text(
             "Не удалось синхронизировать Google таблицу."
             f"{suffix}\nСсылка:\n{GOOGLE_SHEETS_URL}"
         )
         return
 
-    await message.answer(
-        f"✅ Google таблица подключена.\n{sync_text}\n"
+    formatting_text = "Формат обновлён." if formatted else "Формат не применён (данные сохранены)."
+    await progress_message.edit_text(
+        f"✅ Google таблица подключена.\nДанные синхронизированы.\n{formatting_text}\n"
         f"Записано строк: {len(candidates)}\n"
         f"Ссылка:\n{GOOGLE_SHEETS_URL}"
     )
