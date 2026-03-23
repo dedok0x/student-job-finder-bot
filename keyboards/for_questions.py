@@ -23,9 +23,15 @@ def get_what_are_you_looking_for_keyboard() -> InlineKeyboardMarkup:
 def get_direction_keyboard() -> InlineKeyboardMarkup:
     """Return keyboard for direction selection."""
     buttons = [
-        [InlineKeyboardButton(text="IT / Продукт", callback_data="direction_it_product")],
-        [InlineKeyboardButton(text="Digital / маркетинг / дизайн", callback_data="direction_digital_marketing_design")],
-        [InlineKeyboardButton(text="Бизнес / операции", callback_data="direction_business_operations")],
+        [InlineKeyboardButton(text="информационные технологии", callback_data="direction_information_technology")],
+        [InlineKeyboardButton(text="маркетинг", callback_data="direction_marketing")],
+        [InlineKeyboardButton(text="дизайн", callback_data="direction_design")],
+        [InlineKeyboardButton(text="аналитика", callback_data="direction_analytics")],
+        [InlineKeyboardButton(text="продажи", callback_data="direction_sales")],
+        [InlineKeyboardButton(text="клиентская поддержка", callback_data="direction_customer_support")],
+        [InlineKeyboardButton(text="ассистент", callback_data="direction_assistant")],
+        [InlineKeyboardButton(text="операционная деятельность", callback_data="direction_operations")],
+        [InlineKeyboardButton(text="подбор персонала", callback_data="direction_recruitment")],
         [InlineKeyboardButton(text="не знаю, помогите определить", callback_data="direction_help_determine")]
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -47,16 +53,39 @@ def get_skills_keyboard(direction: str) -> InlineKeyboardMarkup:
     """Return keyboard for skills selection based on direction."""
     # Define skills by direction
     skills_by_direction = {
-        "IT / Продукт": [
+        "информационные технологии": [
             "Python", "JavaScript", "HTML", "CSS", "SQL", "Git", "API", "тестирование", "Figma", "Postman"
         ],
-        "Digital / маркетинг / дизайн": [
+        "маркетинг": [
             "ведение социальных сетей", "таргетированная реклама", "контент", "тексты", "Canva",
             "Google Analytics", "Яндекс Метрика", "рекламный кабинет", "рассылки", "Tilda"
         ],
-        "Бизнес / операции": [
+        "дизайн": [
+            "Figma", "Photoshop", "Illustrator", "Canva", "дизайн интерфейсов", "пользовательский опыт",
+            "баннеры", "презентации", "прототипирование"
+        ],
+        "аналитика": [
+            "Excel", "Google Sheets", "SQL", "Power BI", "Tableau", "Python", "визуализация данных", "отчеты"
+        ],
+        "продажи": [
             "CRM", "работа с заявками", "переговоры", "обработка обращений", "холодные сообщения",
             "сопровождение клиентов", "работа с возражениями"
+        ],
+        "клиентская поддержка": [
+            "общение с клиентами", "обработка обращений", "ответы в чатах", "ответы по почте", "CRM",
+            "решение типовых вопросов", "работа с жалобами", "сбор обратной связи", "Notion", "Google Docs"
+        ],
+        "ассистент": [
+            "ведение календаря", "поиск информации", "организация встреч", "напоминания", "работа с документами",
+            "таблицы", "презентации", "Google Docs", "Google Sheets", "Notion", "координация задач", "переписка"
+        ],
+        "операционная деятельность": [
+            "таблицы", "отчеты", "контроль сроков", "координация команды", "постановка задач", "контроль выполнения",
+            "работа с CRM", "документооборот", "описание процессов", "оптимизация процессов", "сбор данных"
+        ],
+        "подбор персонала": [
+            "поиск кандидатов", "разбор резюме", "проведение первичного интервью", "оценка кандидатов", "ведение базы",
+            "переписка с кандидатами", "публикация вакансий", "работа с HH", "LinkedIn", "Google Sheets", "Notion", "CRM"
         ]
     }
     
@@ -96,8 +125,44 @@ def get_confirmation_keyboard() -> InlineKeyboardMarkup:
     """Return keyboard for confirmation."""
     buttons = [
         [InlineKeyboardButton(text="обновить анкету", callback_data="update_profile")],
-        [InlineKeyboardButton(text="изменить направление", callback_data="change_direction")],
         [InlineKeyboardButton(text="загрузить новое резюме", callback_data="upload_resume")],
         [InlineKeyboardButton(text="связаться с менеджером", callback_data="contact_manager")]
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def get_yes_no_keyboard(prefix: str = "yn") -> InlineKeyboardMarkup:
+    """Return yes/no keyboard with configurable callback prefix."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="да", callback_data=f"{prefix}_yes")],
+            [InlineKeyboardButton(text="нет", callback_data=f"{prefix}_no")],
+        ]
+    )
+
+
+def get_contact_request_keyboard() -> ReplyKeyboardMarkup:
+    """Return keyboard with built-in Telegram contact sharing button."""
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="📱 Отправить контакт", request_contact=True)],
+            [KeyboardButton(text="Пропустить и ввести вручную")],
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
+
+
+def get_manager_panel_keyboard() -> ReplyKeyboardMarkup:
+    """Return manager panel keyboard."""
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="👥 Последние кандидаты")],
+            [KeyboardButton(text="📊 Общая статистика")],
+            [KeyboardButton(text="🔎 Поиск по имени")],
+            [KeyboardButton(text="📤 Экспорт CSV")],
+            [KeyboardButton(text="✉️ Отправить сообщение")],
+            [KeyboardButton(text="quit")],
+        ],
+        resize_keyboard=True,
+    )

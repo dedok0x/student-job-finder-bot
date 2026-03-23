@@ -2,7 +2,17 @@ import sqlite3
 from datetime import datetime
 from typing import Dict, List, Optional, Any
 
+from rapidfuzz import fuzz
+
 DB_NAME = 'hr_bot.db'
+
+
+def _ensure_column(cursor: sqlite3.Cursor, table: str, column: str, definition: str) -> None:
+    """Add a column to table if it does not exist."""
+    cursor.execute(f"PRAGMA table_info({table})")
+    existing_columns = {row[1] for row in cursor.fetchall()}
+    if column not in existing_columns:
+        cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
 def init_db():
     """Initialize database with all required tables."""
@@ -13,16 +23,22 @@ def init_db():
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS candidates (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tg_user_id INTEGER,
+            tg_chat_id INTEGER,
             timestamp TEXT,
             username TEXT,
+            candidate_name TEXT,
             first_name TEXT,
             last_name TEXT,
+            age INTEGER,
             who_are_you TEXT,
             what_are_you_looking_for TEXT,
             direction TEXT,
             experience TEXT,
             skills TEXT,
             resume_links TEXT,
+            resume_file_id TEXT,
+            resume_message_link TEXT,
             test_answers TEXT,
             work_style TEXT,
             contacts TEXT,
@@ -32,6 +48,7 @@ def init_db():
             status TEXT DEFAULT 'новая анкета',
             clarifying_answers TEXT,
             salary_expectations TEXT,
+            additional_info TEXT,
             availability_date TEXT,
             manager_notes TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -66,6 +83,14 @@ def init_db():
         )
     ''')
     
+    _ensure_column(cursor, 'candidates', 'tg_user_id', 'INTEGER')
+    _ensure_column(cursor, 'candidates', 'tg_chat_id', 'INTEGER')
+    _ensure_column(cursor, 'candidates', 'candidate_name', 'TEXT')
+    _ensure_column(cursor, 'candidates', 'age', 'INTEGER')
+    _ensure_column(cursor, 'candidates', 'resume_file_id', 'TEXT')
+    _ensure_column(cursor, 'candidates', 'resume_message_link', 'TEXT')
+    _ensure_column(cursor, 'candidates', 'additional_info', 'TEXT')
+
     conn.commit()
     conn.close()
 
@@ -76,25 +101,34 @@ def save_candidate(data: Dict[str, Any]) -> int:
     
     cursor.execute('''
         INSERT INTO candidates (
-            timestamp, username, first_name, last_name, who_are_you, what_are_you_looking_for,
-            direction, experience, skills, resume_links, test_answers, work_style, contacts,
-            clarifying_answers, status, score, tags, level
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            tg_user_id, tg_chat_id, timestamp, username, candidate_name, first_name, last_name, age,
+            who_are_you, what_are_you_looking_for, direction, experience, skills, resume_links,
+            resume_file_id, resume_message_link, test_answers, work_style, contacts,
+            clarifying_answers, salary_expectations, additional_info, status, score, tags, level
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ''', (
+        data.get('tg_user_id'),
+        data.get('tg_chat_id'),
         data.get('timestamp'),
         data.get('username', ''),
+        data.get('candidate_name', ''),
         data.get('first_name', ''),
         data.get('last_name', ''),
+        data.get('age'),
         data.get('who_are_you', ''),
         data.get('what_are_you_looking_for', ''),
         data.get('direction', ''),
         data.get('experience', ''),
         data.get('skills', ''),
         data.get('resume_links', ''),
+        data.get('resume_file_id', ''),
+        data.get('resume_message_link', ''),
         data.get('test_answers', ''),
         data.get('work_style', ''),
         data.get('contacts', ''),
         data.get('clarifying_answers', ''),
+        data.get('salary_expectations', ''),
+        data.get('additional_info', ''),
         data.get('status', 'новая анкета'),
         data.get('score', 0),
         data.get('tags', ''),
@@ -120,6 +154,83 @@ def get_candidate(candidate_id: int) -> Optional[Dict]:
         return dict(row)
     return None
 
+
+def get_latest_candidate_by_telegram(tg_user_id: int, tg_chat_id: int) -> Optional[Dict]:
+    """Get latest candidate by Telegram user/chat IDs."""
+    conn = sqlite3.connect(DB_NAME)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+
+    cursor.execute(
+        '''
+        SELECT *
+        FROM candidates
+        WHERE tg_user_id = ? AND tg_chat_id = ?
+        ORDER BY id DESC
+        LIMIT 1
+        ''',
+        (tg_user_id, tg_chat_id),
+    )
+    row = cursor.fetchone()
+    conn.close()
+
+    if row:
+        return dict(row)
+    return None
+
+
+def has_completed_questionnaire(tg_user_id: int, tg_chat_id: int) -> bool:
+    """Check if user already has a completed questionnaire."""
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute(
+        '''
+        SELECT 1
+        FROM candidates
+        WHERE tg_user_id = ? AND tg_chat_id = ?
+          AND status IN ('анкета заполнена', 'готовая анкета', 'подходит', 'требует проверки')
+        ORDER BY id DESC
+        LIMIT 1
+        ''',
+        (tg_user_id, tg_chat_id),
+    )
+    row = cursor.fetchone()
+    conn.close()
+    return row is not None
+
+
+def update_latest_candidate_resume(
+    tg_user_id: int,
+    tg_chat_id: int,
+    resume_links: str,
+    resume_file_id: str,
+    resume_message_link: str,
+) -> bool:
+    """Update resume fields for latest candidate of a Telegram user."""
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute(
+        '''
+        UPDATE candidates
+        SET resume_links = ?,
+            resume_file_id = ?,
+            resume_message_link = ?,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = (
+            SELECT id
+            FROM candidates
+            WHERE tg_user_id = ? AND tg_chat_id = ?
+            ORDER BY id DESC
+            LIMIT 1
+        )
+        ''',
+        (resume_links, resume_file_id, resume_message_link, tg_user_id, tg_chat_id),
+    )
+    conn.commit()
+    updated = cursor.rowcount > 0
+    conn.close()
+    return updated
+
 def get_all_candidates(filters: Optional[Dict] = None) -> List[Dict]:
     """Get all candidates with optional filters."""
     conn = sqlite3.connect(DB_NAME)
@@ -143,6 +254,47 @@ def get_all_candidates(filters: Optional[Dict] = None) -> List[Dict]:
     conn.close()
     
     return [dict(row) for row in rows]
+
+
+def get_recent_candidates(limit: int = 10) -> List[Dict]:
+    """Get latest candidates ordered by creation time (id desc)."""
+    conn = sqlite3.connect(DB_NAME)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute('SELECT * FROM candidates ORDER BY id DESC LIMIT ?', (limit,))
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+def search_candidates_fuzzy(query: str, limit: int = 10) -> List[Dict]:
+    """Fuzzy search by candidate_name/first_name/last_name using RapidFuzz."""
+    normalized_query = (query or '').strip().lower()
+    if not normalized_query:
+        return []
+
+    candidates = get_all_candidates()
+    scored: List[tuple[int, Dict[str, Any]]] = []
+
+    for candidate in candidates:
+        candidate_name = (candidate.get('candidate_name') or '').strip().lower()
+        first_name = (candidate.get('first_name') or '').strip().lower()
+        last_name = (candidate.get('last_name') or '').strip().lower()
+        full_name = f"{first_name} {last_name}".strip()
+
+        scores = [
+            fuzz.ratio(normalized_query, candidate_name),
+            fuzz.partial_ratio(normalized_query, candidate_name),
+            fuzz.ratio(normalized_query, first_name),
+            fuzz.ratio(normalized_query, last_name),
+            fuzz.partial_ratio(normalized_query, full_name),
+        ]
+        best = int(max(scores))
+        if best >= 55:
+            scored.append((best, candidate))
+
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return [item[1] for item in scored[:limit]]
 
 def update_candidate_status(candidate_id: int, new_status: str, notes: str = '') -> bool:
     """Update candidate status."""

@@ -1,36 +1,54 @@
-import asyncio
-import logging
 import re
 from datetime import datetime
-from typing import Dict, List, Optional, Any
+from typing import Any, Dict, List
+
 from aiogram import Router, F
-from aiogram.types import Message, CallbackQuery, ReplyKeyboardRemove
+from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
-from aiogram.filters import Command
-from keyboards.for_questions import *
+from aiogram.types import CallbackQuery, Message, ReplyKeyboardRemove
 
-from database import save_candidate, update_candidate_score, update_candidate_status
+from database import (
+    has_completed_questionnaire,
+    save_candidate,
+    update_candidate_score,
+    update_candidate_status,
+    update_latest_candidate_resume,
+)
+from keyboards.for_questions import (
+    get_confirmation_keyboard,
+    get_contact_request_keyboard,
+    get_direction_keyboard,
+    get_experience_keyboard,
+    get_skills_keyboard,
+    get_test_questions_keyboard,
+    get_who_are_you_keyboard,
+    get_work_style_keyboard,
+    get_what_are_you_looking_for_keyboard,
+    get_yes_no_keyboard,
+)
 
-logger = logging.getLogger(__name__)
+router = Router()
 
-# Define states for the questionnaire
+
 class Questionnaire(StatesGroup):
+    candidate_name = State()
+    age = State()
     who_are_you = State()
     what_are_you_looking_for = State()
     direction = State()
     clarifying_questions = State()
+    salary_expectations = State()
     experience = State()
     skills = State()
     resume_links = State()
+    add_more_decision = State()
+    add_more_text = State()
     test_questions = State()
     work_style = State()
     contacts = State()
-    confirmation = State()
+    menu_upload_resume = State()
 
-# Router for handling questions
-router = Router()
 
 WHO_ARE_YOU_MAP = {
     "student": "студент",
@@ -47,9 +65,15 @@ LOOKING_FOR_MAP = {
 }
 
 DIRECTION_MAP = {
-    "it_product": "IT / Продукт",
-    "digital_marketing_design": "Digital / маркетинг / дизайн",
-    "business_operations": "Бизнес / операции",
+    "information_technology": "информационные технологии",
+    "marketing": "маркетинг",
+    "design": "дизайн",
+    "analytics": "аналитика",
+    "sales": "продажи",
+    "customer_support": "клиентская поддержка",
+    "assistant": "ассистент",
+    "operations": "операционная деятельность",
+    "recruitment": "подбор персонала",
     "help_determine": "не знаю, помогите определить",
 }
 
@@ -70,531 +94,663 @@ WORK_STYLE_MAP = {
 }
 
 TEST_QUESTIONS_BY_DIRECTION = {
-    "IT / Продукт": [
-        "Что такое HTML / CSS / SQL / API на базовом уровне?",
-        "Чем отличаются интерфейс и серверная часть?",
-        "Для чего нужен Git?",
+    "информационные технологии": [
+        "Представь задачу: нужно получить данные из API и сохранить в таблицу. Какой план действий?",
+        "Есть баг: страница открывается, но кнопка не работает. Что проверишь в первую очередь?",
+        "Как объяснишь на простом языке разницу между фронтендом и бэкендом?",
     ],
-    "Digital / маркетинг / дизайн": [
-        "Чем отличается охват от вовлеченности?",
-        "Что такое целевая аудитория?",
-        "Как понять, что реклама работает?",
+    "маркетинг": [
+        "Тебе дали бюджет 30 000 ₽ на запуск. Какие 3 шага сделаешь перед стартом рекламы?",
+        "По рекламе высокий охват, но мало заявок. Какие гипотезы проверишь?",
+        "Какие 3 метрики считаешь ключевыми для оценки эффективности кампании?",
     ],
-    "Бизнес / операции": [
-        "Что такое воронка продаж?",
-        "Как действовать, если клиент сомневается?",
-        "Зачем фиксировать информацию в CRM?",
+    "дизайн": [
+        "Тебе дали задачу сделать лендинг за 1 день. Как расставишь приоритеты?",
+        "Как проверишь, что твой дизайн понятен пользователю без дополнительных пояснений?",
+        "Какой набор артефактов ты обычно готовишь: wireframe, прототип, UI-kit — и зачем?",
     ],
+    "аналитика": [
+        "Тебе дали сырые данные по продажам. Какие первые шаги в анализе?",
+        "Как обнаружишь аномалии в отчете и проверишь, что это не ошибка данных?",
+        "Какие визуализации ты выберешь для динамики, структуры и сравнения категорий?",
+    ],
+    "продажи": [
+        "Клиент говорит «дорого». Какой сценарий ответа используешь?",
+        "Лид оставил заявку, но не отвечает. Как выстроишь цепочку касаний?",
+        "Какие поля обязательно фиксируешь в CRM после звонка?",
+    ],
+    "клиентская поддержка": [
+        "Как обработаешь обращение, если клиент пишет эмоционально и на повышенных тонах?",
+        "Что сделаешь, если по одному вопросу одновременно пишет много пользователей?",
+        "Как оценишь качество своей поддержки за неделю?",
+    ],
+    "ассистент": [
+        "Руководитель просит срочно подготовить встречу через 2 часа. Твои действия по шагам?",
+        "Как ведешь приоритеты, когда задач много и часть из них без дедлайна?",
+        "Как организуешь хранение документов, чтобы команда быстро находила нужное?",
+    ],
+    "операционная деятельность": [
+        "Процесс регулярно срывает сроки. Как найдешь причину и предложишь решение?",
+        "Какие показатели будешь отслеживать, чтобы видеть стабильность операционных процессов?",
+        "Как внедришь новый регламент так, чтобы команда реально начала его соблюдать?",
+    ],
+    "подбор персонала": [
+        "По каким критериям быстро отсеиваешь нерелевантные резюме?",
+        "Какие вопросы задашь на первичном интервью, чтобы проверить мотивацию кандидата?",
+        "Как организуешь воронку подбора, чтобы не терять кандидатов между этапами?",
+    ],
+}
+
+SKILL_CLARIFY_DIRECTION_HINTS = {
+    "информационные технологии": ["python", "sql", "api", "git", "код", "программ"],
+    "маркетинг": ["реклама", "контент", "соц", "таргет", "метрика"],
+    "дизайн": ["figma", "photoshop", "ux", "ui", "баннер", "дизайн"],
+    "аналитика": ["excel", "tableau", "power bi", "данн", "аналит"],
+    "продажи": ["продаж", "переговор", "лид", "возраж"],
+    "клиентская поддержка": ["поддержк", "чат", "жалоб", "обращени"],
+    "ассистент": ["календар", "встреч", "ассист", "документ"],
+    "операционная деятельность": ["операц", "процесс", "срок", "координац"],
+    "подбор персонала": ["кандидат", "рекрут", "интервью", "hh", "linkedin"],
 }
 
 EMAIL_REGEX = re.compile(r"(?i)^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$")
 PHONE_REGEX = re.compile(r"^(?:\+7|7|8)?[\s\-()]*\d(?:[\s\-()]*\d){9,10}$")
-TG_REGEX = re.compile(r"^(?:@|https?://t\.me/)([A-Za-z0-9_]{5,32})$")
+GREETING_WORDS = {"привет", "здарова", "здравствуйте", "добрый", "хай", "чё", "че", "как", "hello", "hi"}
 
-# Helper function to get direction options
-def get_direction_options() -> List[InlineKeyboardButton]:
-    """Return inline keyboard buttons for direction selection."""
-    directions = [
-        "IT / Продукт",
-        "Digital / маркетинг / дизайн", 
-        "Бизнес / операции",
-        "не знаю, помогите определить"
-    ]
-    return [InlineKeyboardButton(text=direction, callback_data=f"direction_{direction.lower().replace(' ', '_').replace('/', '_').replace('-', '_')}") for direction in directions]
 
-# Helper function to get experience options
-def get_experience_options() -> List[InlineKeyboardButton]:
-    """Return inline keyboard buttons for experience selection."""
-    experiences = [
-        "нет опыта",
-        "стажировка", 
-        "курсы",
-        "учебные проекты",
-        "фриланс",
-        "коммерческий опыт до 1 года",
-        "1-2 года"
-    ]
-    return [InlineKeyboardButton(text=exp, callback_data=f"exp_{exp}") for exp in experiences]
+def is_greeting_or_generic(text: str) -> bool:
+    normalized = (text or "").strip().lower()
+    if not normalized:
+        return True
+    if normalized.startswith("/"):
+        return False
+    return any(token in normalized for token in GREETING_WORDS) or len(normalized) < 3
 
-# Helper function to get work style options
-def get_work_style_options() -> List[InlineKeyboardButton]:
-    """Return inline keyboard buttons for work style selection."""
-    styles = [
-        "сразу уточняю у руководителя",
-        "сначала сам разбираюсь, потом задаю вопросы",
-        "откладываю и жду дополнительных пояснений"
-    ]
-    return [InlineKeyboardButton(text=style, callback_data=f"style_{style}") for style in styles]
 
-# Helper function to get contact options
-def get_contact_options() -> List[InlineKeyboardButton]:
-    """Return inline keyboard buttons for contact preferences."""
-    contacts = [
-        "Telegram",
-        "Email",
-        "Phone"
-    ]
-    return [InlineKeyboardButton(text=contact, callback_data=f"contact_{contact}") for contact in contacts]
+def build_tg_resume_ref(message: Message) -> tuple[str, str]:
+    file_id = ""
+    if message.document:
+        file_id = message.document.file_id
+    elif message.photo:
+        file_id = message.photo[-1].file_id
 
-# Start the questionnaire
-@router.message(Command(commands=['start', 'help']))
-async def start_questionnaire(message: Message, state: FSMContext):
-    """Start the questionnaire."""
+    chat_id = message.chat.id
+    if str(chat_id).startswith("-100"):
+        message_link = f"https://t.me/c/{str(chat_id)[4:]}/{message.message_id}"
+    else:
+        message_link = f"tg://message?chat_id={chat_id}&message_id={message.message_id}"
+    return file_id, message_link
+
+
+def normalize_resume_from_message(message: Message) -> tuple[str, str, str] | None:
+    if message.document:
+        mime = (message.document.mime_type or "").lower()
+        filename = (message.document.file_name or "").lower()
+        is_pdf = mime == "application/pdf" or filename.endswith(".pdf")
+        is_png = mime == "image/png" or filename.endswith(".png")
+        if not (is_pdf or is_png):
+            return None
+        file_id, message_link = build_tg_resume_ref(message)
+        return f"telegram_cloud:{message_link}", file_id, message_link
+
+    if message.photo:
+        file_id, message_link = build_tg_resume_ref(message)
+        return f"telegram_cloud:{message_link}", file_id, message_link
+
+    if message.text:
+        return message.text.strip(), "", ""
+
+    return None
+
+
+async def ask_first_question(message: Message, state: FSMContext) -> None:
     await state.clear()
-    
-    welcome_text = (
-        "👋 Привет! Я помогу собрать информацию для быстрого отбора.\n\n"
-        "Ответь на несколько простых вопросов, и мы сразу перейдём к следующему этапу.\n"
-        "Все ответы сохранятся в нашу базу.\n"
-        "\n"
-        "Начнём с первого вопроса:"
+    await state.set_state(Questionnaire.candidate_name)
+    await message.answer(
+        "👋 Привет! Я помогу быстро собрать анкету для подбора вакансий.\n"
+        "Сначала познакомимся.\n\n"
+        "1️⃣ Как тебя зовут?",
+        reply_markup=ReplyKeyboardRemove(),
     )
-    
-    await message.answer(welcome_text, reply_markup=ReplyKeyboardRemove())
-    
-    # Move to the first question
-    await state.set_state(Questionnaire.who_are_you)
-    await message.answer("1️⃣ Кто ты?\n"
-                        "студент / выпускник / начинающий специалист / меняю профессию",
-                        reply_markup=get_who_are_you_keyboard())
 
-# Process "Who are you" question
+
+async def show_main_menu(message: Message) -> None:
+    await message.answer("📌 У тебя уже есть заполненная анкета. Выбери действие:", reply_markup=get_confirmation_keyboard())
+
+
+async def start_flow_or_menu(message: Message, state: FSMContext) -> None:
+    if not message.from_user:
+        return
+
+    if has_completed_questionnaire(message.from_user.id, message.chat.id):
+        await state.clear()
+        await show_main_menu(message)
+        return
+
+    await ask_first_question(message, state)
+
+
+@router.message(Command(commands=["start", "help"]))
+async def start_questionnaire(message: Message, state: FSMContext):
+    await start_flow_or_menu(message, state)
+
+
+@router.callback_query(lambda c: c.data == "update_profile")
+async def menu_update_profile(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    if callback.message:
+        await callback.message.answer("Обновляем анкету 👇")
+        await ask_first_question(callback.message, state)
+
+
+@router.callback_query(lambda c: c.data == "upload_resume")
+async def menu_upload_resume(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.set_state(Questionnaire.menu_upload_resume)
+    if callback.message:
+        await callback.message.answer(
+            "Пришли новое резюме в PDF/PNG, фото или ссылку.\n"
+            "Также можно отправить GitHub или LinkedIn."
+        )
+
+
+@router.callback_query(lambda c: c.data == "contact_manager")
+async def menu_contact_manager(callback: CallbackQuery):
+    await callback.answer()
+    if callback.message:
+        await callback.message.answer("Для связи с менеджером: @SJIONIK")
+
+
+@router.message(Questionnaire.menu_upload_resume)
+async def process_menu_resume_upload(message: Message, state: FSMContext):
+    if not message.from_user:
+        return
+
+    normalized = normalize_resume_from_message(message)
+    if not normalized:
+        await message.answer("Поддерживаются PDF/PNG, фото или текстовая ссылка. Отправь файл заново.")
+        return
+
+    resume_links, resume_file_id, resume_message_link = normalized
+    ok = update_latest_candidate_resume(
+        tg_user_id=message.from_user.id,
+        tg_chat_id=message.chat.id,
+        resume_links=resume_links,
+        resume_file_id=resume_file_id,
+        resume_message_link=resume_message_link,
+    )
+    await state.clear()
+    if ok:
+        await message.answer("✅ Новое резюме сохранено.", reply_markup=get_confirmation_keyboard())
+    else:
+        await message.answer("Анкета не найдена. Сначала заполни анкету.", reply_markup=get_confirmation_keyboard())
+
+
+@router.message(Questionnaire.candidate_name)
+async def process_candidate_name(message: Message, state: FSMContext):
+    name = (message.text or "").strip()
+    if len(name) < 2:
+        await message.answer("Введи имя текстом (минимум 2 символа).")
+        return
+    await state.update_data(candidate_name=name)
+    await state.set_state(Questionnaire.age)
+    await message.answer("2️⃣ Сколько тебе лет?")
+
+
+@router.message(Questionnaire.age)
+async def process_age(message: Message, state: FSMContext):
+    text = (message.text or "").strip()
+    if not text.isdigit():
+        await message.answer("Укажи возраст числом, например: 21")
+        return
+    age = int(text)
+    if age < 14 or age > 80:
+        await message.answer("Укажи корректный возраст (14-80).")
+        return
+    await state.update_data(age=age)
+    await state.set_state(Questionnaire.who_are_you)
+    await message.answer(
+        "3️⃣ Кто ты?\n"
+        "студент / выпускник / начинающий специалист / меняю профессию",
+        reply_markup=get_who_are_you_keyboard(),
+    )
+
+
 @router.callback_query(Questionnaire.who_are_you)
 async def process_who_are_you(callback: CallbackQuery, state: FSMContext):
-    """Process who are you question."""
-    user_choice = callback.data
-    
-    # Extract the actual choice from callback data
-    if user_choice.startswith("who_"):
-        choice_key = user_choice[4:]  # Remove "who_" prefix
-        choice = WHO_ARE_YOU_MAP.get(choice_key, choice_key)
-        await state.update_data(who_are_you=choice)
-        
-        # Move to next question
-        await state.set_state(Questionnaire.what_are_you_looking_for)
-        await callback.message.answer("2️⃣ Что ищешь?\n"
-                                    "стажировка / частичная занятость / полная занятость / проектная работа",
-                                    reply_markup=get_what_are_you_looking_for_keyboard())
-    else:
-        await callback.answer("Пожалуйста, выберите один из вариантов.", show_alert=True)
+    data = callback.data or ""
+    if not data.startswith("who_"):
+        await callback.answer("Выбери один из вариантов", show_alert=True)
+        return
+    choice_key = data[4:]
+    await state.update_data(who_are_you=WHO_ARE_YOU_MAP.get(choice_key, choice_key))
+    await state.set_state(Questionnaire.what_are_you_looking_for)
+    await callback.message.answer(
+        "4️⃣ Что ищешь?\n"
+        "стажировка / частичная занятость / полная занятость / проектная работа",
+        reply_markup=get_what_are_you_looking_for_keyboard(),
+    )
+    await callback.answer()
 
-# Process "What are you looking for" question
+
 @router.callback_query(Questionnaire.what_are_you_looking_for)
-async def process_what_are_you_looking_for(callback: CallbackQuery, state: FSMContext):
-    """Process what are you looking for question."""
-    user_choice = callback.data
-    
-    if user_choice.startswith("looking_"):
-        choice_key = user_choice[8:]  # Remove "looking_" prefix
-        choice = LOOKING_FOR_MAP.get(choice_key, choice_key)
-        await state.update_data(what_are_you_looking_for=choice)
-        
-        # Move to direction selection
-        await state.set_state(Questionnaire.direction)
-        await callback.message.answer("3️⃣ Какое направление тебе ближе?\n"
-                                    "Выбери одно из направлений:",
-                                    reply_markup=get_direction_keyboard())
-    else:
-        await callback.answer("Пожалуйста, выберите один из вариантов.", show_alert=True)
+async def process_looking_for(callback: CallbackQuery, state: FSMContext):
+    data = callback.data or ""
+    if not data.startswith("looking_"):
+        await callback.answer("Выбери один из вариантов", show_alert=True)
+        return
+    choice_key = data[8:]
+    await state.update_data(what_are_you_looking_for=LOOKING_FOR_MAP.get(choice_key, choice_key))
+    await state.set_state(Questionnaire.direction)
+    await callback.message.answer(
+        "5️⃣ Какое направление тебе ближе?",
+        reply_markup=get_direction_keyboard(),
+    )
+    await callback.answer()
 
-# Process direction selection
+
+async def ask_clarifying_question(message: Message, state: FSMContext, index: int) -> None:
+    questions = [
+        "1) Тебе ближе люди, цифры, тексты, визуал или системы?",
+        "2) Что интереснее: продавать, анализировать, поддерживать клиентов, организовывать или разрабатывать?",
+        "3) Что больше нравится: креативные задачи или структурные процессы?",
+        "4) Комфортно ли много общаться с клиентами/кандидатами?",
+        "5) Какие инструменты уже пробовал(а): таблицы, CRM, Figma, код, реклама?",
+    ]
+    if index < len(questions):
+        await state.update_data(current_question_index=index)
+        await message.answer(questions[index])
+        return
+
+    user_data = await state.get_data()
+    answers = " ".join(user_data.get("clarifying_answers", [])).lower()
+    picked = "операционная деятельность"
+    best = -1
+    for direction, hints in SKILL_CLARIFY_DIRECTION_HINTS.items():
+        score = sum(1 for hint in hints if hint in answers)
+        if score > best:
+            best = score
+            picked = direction
+
+    await state.update_data(direction=picked)
+    await state.set_state(Questionnaire.salary_expectations)
+    await message.answer(f"Похоже, тебе ближе направление: {picked}")
+    await message.answer("6️⃣ Какие зарплатные ожидания? (например: 60 000 ₽)")
+
+
 @router.callback_query(Questionnaire.direction)
 async def process_direction(callback: CallbackQuery, state: FSMContext):
-    """Process direction selection."""
-    user_choice = callback.data
-    
-    if user_choice.startswith("direction_"):
-        choice_key = user_choice[10:]  # Remove "direction_" prefix
-        choice = DIRECTION_MAP.get(choice_key, choice_key)
-        await state.update_data(direction=choice)
-        
-        # Check if user selected "не знаю, помогите определить"
-        if choice_key == "help_determine":
-            # Ask clarifying questions
-            await state.set_state(Questionnaire.clarifying_questions)
-            await callback.message.answer("Хорошо, давай определим направление вместе!\n"
-                                        "Ответь на несколько вопросов:")
-            await ask_clarifying_question(callback.message, state, 0)
-        else:
-            # Continue with experience question
-            await state.set_state(Questionnaire.experience)
-            await callback.message.answer("4️⃣ Базовый опыт\n"
-                                        "Выбери подходящий вариант:",
-                                        reply_markup=get_experience_keyboard())
-    else:
-        await callback.answer("Пожалуйста, выберите одно из направлений.", show_alert=True)
+    data = callback.data or ""
+    if not data.startswith("direction_"):
+        await callback.answer("Выбери одно из направлений", show_alert=True)
+        return
 
-# Clarifying questions logic
-async def ask_clarifying_question(message: Message, state: FSMContext, question_index: int):
-    """Ask clarifying questions to determine direction."""
-    clarifying_questions = [
-        "1. Тебе ближе работать с людьми, цифрами, текстами, визуалом или системами?",
-        "2. Нравится больше анализировать, организовывать, продавать, создавать или поддерживать процессы?",
-        "3. Тебе ближе креатив или структура?",
-        "4. Комфортно ли тебе общаться с клиентами или командой?",
-        "5. Интересно ли тебе работать с таблицами, данными, задачами, контентом, интерфейсами?"
-    ]
-    
-    if question_index < len(clarifying_questions):
-        await message.answer(clarifying_questions[question_index])
-        # Store the question index to continue later
-        await state.update_data(current_question_index=question_index)
-    else:
-        # Determine direction based on answers
-        # For simplicity, we'll just assign a default direction here
-        # In a real implementation, you'd analyze the answers
-        await state.update_data(direction="IT / Продукт")
-        await state.set_state(Questionnaire.experience)
-        await message.answer("4️⃣ Базовый опыт\n"
-                            "Выбери подходящий вариант:",
-                            reply_markup=get_experience_keyboard())
+    key = data[10:]
+    direction = DIRECTION_MAP.get(key, key)
+    await state.update_data(direction=direction)
 
-# Process clarifying question answers
+    if key == "help_determine":
+        await state.set_state(Questionnaire.clarifying_questions)
+        await callback.message.answer("Помогу определить направление. Ответь на 5 коротких вопросов:")
+        await ask_clarifying_question(callback.message, state, 0)
+    else:
+        await state.set_state(Questionnaire.salary_expectations)
+        await callback.message.answer("6️⃣ Какие зарплатные ожидания? (например: 60 000 ₽)")
+    await callback.answer()
+
+
 @router.message(Questionnaire.clarifying_questions)
 async def process_clarifying_answer(message: Message, state: FSMContext):
-    """Process clarifying question answers."""
-    # Get current question index
     data = await state.get_data()
-    current_index = data.get('current_question_index', 0)
-    
-    # Store the answer
-    answers = data.get('clarifying_answers', [])
-    answers.append(message.text)
+    answers = data.get("clarifying_answers", [])
+    answers.append((message.text or "").strip())
     await state.update_data(clarifying_answers=answers)
-    
-    # Ask the next question
-    current_index += 1
-    await ask_clarifying_question(message, state, current_index)
+    await ask_clarifying_question(message, state, data.get("current_question_index", 0) + 1)
 
-# Process experience selection
+
+@router.message(Questionnaire.salary_expectations)
+async def process_salary(message: Message, state: FSMContext):
+    salary = (message.text or "").strip()
+    if len(salary) < 2:
+        await message.answer("Укажи ожидания текстом, например: 60 000 ₽")
+        return
+    await state.update_data(salary_expectations=salary)
+    await state.set_state(Questionnaire.experience)
+    await message.answer("7️⃣ Какой у тебя текущий опыт?", reply_markup=get_experience_keyboard())
+
+
 @router.callback_query(Questionnaire.experience)
 async def process_experience(callback: CallbackQuery, state: FSMContext):
-    """Process experience selection."""
-    user_choice = callback.data
-    
-    if user_choice.startswith("exp_"):
-        choice_key = user_choice[4:]  # Remove "exp_" prefix
-        choice = EXPERIENCE_MAP.get(choice_key, choice_key)
-        await state.update_data(experience=choice)
-        
-        # Move to skills selection
-        await state.set_state(Questionnaire.skills)
-        # Get the selected direction to show relevant skills
-        data = await state.get_data()
-        direction = data.get('direction', 'IT / Продукт')
-        await callback.message.answer("5️⃣ Навыки / инструменты\n"
-                                    "Выбери подходящие навыки (можно выбрать несколько):",
-                                    reply_markup=get_skills_keyboard(direction))
-    else:
-        await callback.answer("Пожалуйста, выберите один из вариантов.", show_alert=True)
+    data = callback.data or ""
+    if not data.startswith("exp_"):
+        await callback.answer("Выбери один вариант", show_alert=True)
+        return
 
-# Process skills selection
+    await state.update_data(experience=EXPERIENCE_MAP.get(data[4:], data[4:]))
+    direction = (await state.get_data()).get("direction", "информационные технологии")
+    await state.set_state(Questionnaire.skills)
+    await callback.message.answer(
+        "8️⃣ Отметь навыки и инструменты, с которыми уже работал(а).\n"
+        "Можно выбрать несколько вариантов и нажать «Готово».",
+        reply_markup=get_skills_keyboard(direction),
+    )
+    await callback.answer()
+
+
 @router.callback_query(Questionnaire.skills)
 async def process_skills(callback: CallbackQuery, state: FSMContext):
-    """Process skills selection."""
-    user_choice = callback.data
-    
-    # Get current skills from state
-    data = await state.get_data()
-    current_skills = data.get('skills', [])
-    
-    # Handle skill selection
-    if user_choice.startswith("skill_") and user_choice != "skill_done":
-        data = await state.get_data()
-        direction = data.get('direction', 'IT / Продукт')
-        skills_keyboard = get_skills_keyboard(direction)
-        skill = next(
-            (
-                btn.text
-                for row in skills_keyboard.inline_keyboard
-                for btn in row
-                if btn.callback_data == user_choice
-            ),
-            user_choice[6:]
-        )
-        if skill not in current_skills:
-            current_skills.append(skill)
-        
-        # Update state with new skills
-        await state.update_data(skills=current_skills)
-        
-        # Show updated skills list
-        await callback.answer(f"Добавлен навык: {skill}")
-        
-        # Show the skills keyboard again for more selections
-        data = await state.get_data()
-        direction = data.get('direction', 'IT / Продукт')
-        await callback.message.edit_reply_markup(reply_markup=get_skills_keyboard(direction))
-    elif user_choice == "skill_done":
-        # User finished selecting skills
-        await state.set_state(Questionnaire.resume_links)
-        await callback.message.answer("6️⃣ Резюме / ссылки / портфолио\n"
-                                    "Пришли ссылки на резюме, GitHub, LinkedIn и т.д. (можно оставить пустым)")
-    else:
-        await callback.answer("Пожалуйста, выберите навыки.", show_alert=True)
+    data = callback.data or ""
+    state_data = await state.get_data()
+    selected = state_data.get("skills", [])
 
-# Process resume links
+    if data.startswith("skill_") and data != "skill_done":
+        direction = state_data.get("direction", "информационные технологии")
+        kb = get_skills_keyboard(direction)
+        skill = next((btn.text for row in kb.inline_keyboard for btn in row if btn.callback_data == data), data[6:])
+        if skill not in selected:
+            selected.append(skill)
+            await state.update_data(skills=selected)
+            await callback.answer(f"Добавлено: {skill}")
+        else:
+            await callback.answer("Уже выбрано")
+        return
+
+    if data == "skill_done":
+        await state.set_state(Questionnaire.resume_links)
+        await callback.message.answer(
+            "9️⃣ Загрузка резюме\n"
+            "Отправь PDF/PNG, фото или текстовую ссылку на резюме/портфолио.\n"
+            "Также можно указать GitHub или LinkedIn."
+        )
+        await callback.answer()
+        return
+
+    await callback.answer("Выбери навык или нажми «Готово»", show_alert=True)
+
+
 @router.message(Questionnaire.resume_links)
 async def process_resume_links(message: Message, state: FSMContext):
-    """Process resume links."""
-    resume_links = message.text.strip()
-    await state.update_data(resume_links=resume_links)
-    
-    # Move to test questions
-    await state.set_state(Questionnaire.test_questions)
-    data = await state.get_data()
-    direction = data.get('direction', 'IT / Продукт')
-    await message.answer("7️⃣ Короткий тест по выбранному направлению\n"
-                        f"Направление: {direction}\n"
-                        "Ответь на несколько вопросов (можно пропустить):",
-                        reply_markup=get_test_questions_keyboard())
+    normalized = normalize_resume_from_message(message)
+    if not normalized:
+        await message.answer("Поддерживаются PDF/PNG, фото или текстовая ссылка. Отправь корректный формат.")
+        return
 
-# Process test questions
+    resume_links, resume_file_id, resume_message_link = normalized
+    await state.update_data(
+        resume_links=resume_links,
+        resume_file_id=resume_file_id,
+        resume_message_link=resume_message_link,
+    )
+    await state.set_state(Questionnaire.add_more_decision)
+    await message.answer("Хочешь добавить что-то ещё к анкете?", reply_markup=get_yes_no_keyboard("add"))
+
+
+@router.callback_query(Questionnaire.add_more_decision)
+async def process_add_more_decision(callback: CallbackQuery, state: FSMContext):
+    data = callback.data or ""
+    if data == "add_yes":
+        await state.set_state(Questionnaire.add_more_text)
+        await callback.message.answer("Напиши дополнительную информацию одним сообщением.")
+        await callback.answer()
+        return
+
+    if data == "add_no":
+        await state.update_data(additional_info="")
+        await state.set_state(Questionnaire.test_questions)
+        direction = (await state.get_data()).get("direction", "информационные технологии")
+        await callback.message.answer(
+            f"🔟 Мини-тест по направлению: {direction}\n"
+            "Нажми «Пройти тест» или «Пропустить».",
+            reply_markup=get_test_questions_keyboard(),
+        )
+        await callback.answer()
+        return
+
+    await callback.answer("Выбери: да или нет", show_alert=True)
+
+
+@router.message(Questionnaire.add_more_text)
+async def process_add_more_text(message: Message, state: FSMContext):
+    await state.update_data(additional_info=(message.text or "").strip())
+    await state.set_state(Questionnaire.test_questions)
+    direction = (await state.get_data()).get("direction", "информационные технологии")
+    await message.answer(
+        f"🔟 Мини-тест по направлению: {direction}\n"
+        "Нажми «Пройти тест» или «Пропустить».",
+        reply_markup=get_test_questions_keyboard(),
+    )
+
+
 @router.callback_query(Questionnaire.test_questions)
 async def process_test_questions(callback: CallbackQuery, state: FSMContext):
-    """Process test questions."""
-    user_choice = callback.data
     data = await state.get_data()
-    direction = data.get('direction', 'IT / Продукт')
-    questions = TEST_QUESTIONS_BY_DIRECTION.get(direction, TEST_QUESTIONS_BY_DIRECTION["IT / Продукт"])
+    direction = data.get("direction", "информационные технологии")
+    questions = TEST_QUESTIONS_BY_DIRECTION.get(direction, TEST_QUESTIONS_BY_DIRECTION["информационные технологии"])
+    choice = callback.data or ""
 
-    if user_choice == "test_skip":
+    if choice == "test_skip":
         await state.update_data(test_answers="пропущено")
         await state.set_state(Questionnaire.work_style)
         await callback.message.answer(
-            "8️⃣ Рабочий стиль\n"
-            "Если задача непонятна, что ты обычно делаешь?\n"
-            "Выбери подходящий вариант:",
-            reply_markup=get_work_style_keyboard()
+            "1️⃣1️⃣ Какой у тебя рабочий стиль?\n"
+            "Если задача сформулирована не до конца, как ты обычно действуешь?",
+            reply_markup=get_work_style_keyboard(),
         )
+        await callback.answer()
         return
 
-    if user_choice == "test_start":
-        await state.update_data(
-            test_questions_pool=questions,
-            test_question_index=0,
-            test_answers=[]
-        )
-        await callback.message.answer(
-            f"Вопрос 1/{len(questions)}:\n{questions[0]}\n\n"
-            "Напиши ответ текстом или отправь 'пропустить'."
-        )
+    if choice == "test_start":
+        await state.update_data(test_questions_pool=questions, test_question_index=0, test_answers=[])
+        await callback.message.answer(f"Вопрос 1/{len(questions)}:\n{questions[0]}\n\nОтветь текстом или напиши «пропустить».")
+        await callback.answer()
         return
 
-    await callback.answer("Пожалуйста, выберите: пройти тест или пропустить.", show_alert=True)
+    await callback.answer("Выбери: пройти тест или пропустить", show_alert=True)
 
 
 @router.message(Questionnaire.test_questions)
 async def process_test_answer(message: Message, state: FSMContext):
-    """Process text answers for short test questions."""
     data = await state.get_data()
-    questions = data.get('test_questions_pool')
-    current_index = data.get('test_question_index', 0)
-
+    questions = data.get("test_questions_pool")
+    idx = data.get("test_question_index", 0)
     if not questions:
-        await message.answer("Нажми кнопку: 'Пройти тест' или 'Пропустить'.", reply_markup=get_test_questions_keyboard())
+        await message.answer("Нажми кнопку: «Пройти тест» или «Пропустить».", reply_markup=get_test_questions_keyboard())
         return
 
-    answers = data.get('test_answers', [])
-    current_question = questions[current_index]
-    text = (message.text or "").strip()
-    answer = "пропущено" if text.lower() in {"пропустить", "skip", "-"} else text
-    answers.append({"question": current_question, "answer": answer})
+    answers = data.get("test_answers", [])
+    txt = (message.text or "").strip()
+    answer = "пропущено" if txt.lower() in {"пропустить", "skip", "-"} else txt
+    answers.append({"question": questions[idx], "answer": answer})
 
-    next_index = current_index + 1
-    if next_index < len(questions):
-        await state.update_data(test_answers=answers, test_question_index=next_index)
-        await message.answer(
-            f"Вопрос {next_index + 1}/{len(questions)}:\n{questions[next_index]}\n\n"
-            "Напиши ответ текстом или отправь 'пропустить'."
-        )
+    next_idx = idx + 1
+    if next_idx < len(questions):
+        await state.update_data(test_answers=answers, test_question_index=next_idx)
+        await message.answer(f"Вопрос {next_idx + 1}/{len(questions)}:\n{questions[next_idx]}\n\nОтветь текстом или напиши «пропустить».")
         return
 
-    formatted_answers = "\n".join(
-        [f"{i + 1}. {item['question']} -> {item['answer']}" for i, item in enumerate(answers)]
-    )
-    await state.update_data(test_answers=formatted_answers)
+    formatted = "\n".join([f"{i + 1}. {item['question']} -> {item['answer']}" for i, item in enumerate(answers)])
+    await state.update_data(test_answers=formatted)
     await state.set_state(Questionnaire.work_style)
     await message.answer(
-        "8️⃣ Рабочий стиль\n"
-        "Если задача непонятна, что ты обычно делаешь?\n"
-        "Выбери подходящий вариант:",
-        reply_markup=get_work_style_keyboard()
+        "1️⃣1️⃣ Какой у тебя рабочий стиль?\n"
+        "Если задача сформулирована не до конца, как ты обычно действуешь?",
+        reply_markup=get_work_style_keyboard(),
     )
 
-# Process work style
+
 @router.callback_query(Questionnaire.work_style)
 async def process_work_style(callback: CallbackQuery, state: FSMContext):
-    """Process work style selection."""
-    user_choice = callback.data
-    
-    if user_choice.startswith("style_"):
-        choice_key = user_choice[6:]  # Remove "style_" prefix
-        choice = WORK_STYLE_MAP.get(choice_key, choice_key)
-        await state.update_data(work_style=choice)
-        
-        # Move to contacts
-        await state.set_state(Questionnaire.contacts)
-        await state.update_data(contact_step="email")
-        await callback.message.answer("9️⃣ Контакты и доступность\n"
-                                    "Шаг 1/3. Укажи email:")
-    else:
-        await callback.answer("Пожалуйста, выберите один из вариантов.", show_alert=True)
+    data = callback.data or ""
+    if not data.startswith("style_"):
+        await callback.answer("Выбери вариант", show_alert=True)
+        return
 
-# Process contacts
+    await state.update_data(work_style=WORK_STYLE_MAP.get(data[6:], data[6:]))
+    await state.set_state(Questionnaire.contacts)
+    await state.update_data(contact_step="email")
+    await callback.message.answer("1️⃣2️⃣ Контакты\nШаг 1/2: укажи email")
+    await callback.answer()
+
+
 @router.message(Questionnaire.contacts)
 async def process_contacts(message: Message, state: FSMContext):
-    """Process contacts."""
-    raw_value = (message.text or "").strip()
     data = await state.get_data()
     step = data.get("contact_step", "email")
 
     if step == "email":
-        email = raw_value.lower()
+        email = (message.text or "").strip().lower()
         if not EMAIL_REGEX.fullmatch(email):
-            await message.answer(
-                "Некорректный email.\n"
-                "Пример: example@mail.com\n"
-                "Введи email ещё раз:"
-            )
+            await message.answer("Некорректный email. Пример: example@mail.com")
             return
-
         await state.update_data(contact_email=email, contact_step="phone")
-        await message.answer("Шаг 2/3. Укажи телефон в формате +79991234567:")
+        await message.answer(
+            "Шаг 2/2: отправь номер кнопкой ниже или введи вручную в формате +79991234567",
+            reply_markup=get_contact_request_keyboard(),
+        )
         return
 
-    if step == "phone":
-        if not PHONE_REGEX.fullmatch(raw_value):
-            await message.answer(
-                "Некорректный телефон.\n"
-                "Допустимые форматы: +79991234567, 89991234567, 79991234567\n"
-                "Введи телефон ещё раз:"
-            )
-            return
-
-        phone_digits = "".join(ch for ch in raw_value if ch.isdigit())
-        if len(phone_digits) == 11 and phone_digits.startswith("8"):
-            phone_digits = "7" + phone_digits[1:]
-        phone = f"+{phone_digits}" if len(phone_digits) == 11 and phone_digits.startswith("7") else ""
-        if not phone:
-            await message.answer("Некорректный телефон. Введи в формате +79991234567:")
-            return
-
-        await state.update_data(contact_phone=phone, contact_step="telegram")
-        await message.answer("Шаг 3/3. Укажи Telegram в формате @username или https://t.me/username:")
-        return
-
-    if step == "telegram":
-        tg_match = TG_REGEX.fullmatch(raw_value)
-        if not tg_match:
-            await message.answer(
-                "Некорректный Telegram username.\n"
-                "Пример: @username или https://t.me/username\n"
-                "Введи Telegram ещё раз:"
-            )
-            return
-
-        telegram = f"@{tg_match.group(1)}"
-        email = data.get("contact_email", "")
-        phone = data.get("contact_phone", "")
-        contacts = f"Email: {email}; Телефон: {phone}; Telegram: {telegram}"
-        await state.update_data(contacts=contacts)
-
+    phone = ""
+    if message.contact and message.contact.phone_number:
+        digits = "".join(ch for ch in message.contact.phone_number if ch.isdigit())
+        if len(digits) == 11 and digits.startswith("8"):
+            digits = "7" + digits[1:]
+        phone = f"+{digits}" if len(digits) == 11 and digits.startswith("7") else ""
     else:
-        await state.update_data(contact_step="email")
-        await message.answer("Шаг 1/3. Укажи email:")
-        return
-    
-    # Collect all data and save to database
-    user_data = await state.get_data()
-    user_data.update({
-        'timestamp': datetime.now().isoformat(),
-        'username': message.from_user.username or '',
-        'first_name': message.from_user.first_name,
-        'last_name': message.from_user.last_name,
-        'status': 'новая анкета'
-    })
-    
-    # Normalize complex fields before save to DB
-    if isinstance(user_data.get('skills'), list):
-        user_data['skills'] = ', '.join(user_data['skills'])
-    if isinstance(user_data.get('clarifying_answers'), list):
-        user_data['clarifying_answers'] = ' | '.join(user_data['clarifying_answers'])
-    if isinstance(user_data.get('test_answers'), (list, dict)):
-        user_data['test_answers'] = str(user_data['test_answers'])
+        raw = (message.text or "").strip()
+        if raw == "Пропустить и ввести вручную":
+            await message.answer("Введи телефон в формате +79991234567")
+            return
+        if PHONE_REGEX.fullmatch(raw):
+            digits = "".join(ch for ch in raw if ch.isdigit())
+            if len(digits) == 11 and digits.startswith("8"):
+                digits = "7" + digits[1:]
+            phone = f"+{digits}" if len(digits) == 11 and digits.startswith("7") else ""
 
-    # Save to database
+    if not phone:
+        await message.answer("Некорректный телефон. Отправь контакт кнопкой или введи вручную в формате +79991234567")
+        return
+
+    contacts = f"Email: {data.get('contact_email', '')}; Телефон: {phone}"
+    await state.update_data(contacts=contacts)
+
+    user_data = await state.get_data()
+    user_data.update(
+        {
+            "timestamp": datetime.now().isoformat(),
+            "username": message.from_user.username or "",
+            "first_name": message.from_user.first_name or "",
+            "last_name": message.from_user.last_name or "",
+            "tg_user_id": message.from_user.id,
+            "tg_chat_id": message.chat.id,
+            "status": "новая анкета",
+        }
+    )
+
+    if isinstance(user_data.get("skills"), list):
+        user_data["skills"] = ", ".join(user_data["skills"])
+    if isinstance(user_data.get("clarifying_answers"), list):
+        user_data["clarifying_answers"] = " | ".join(user_data["clarifying_answers"])
+    if isinstance(user_data.get("test_answers"), (list, dict)):
+        user_data["test_answers"] = str(user_data["test_answers"])
+
     candidate_id = save_candidate(user_data)
-    
-    # Calculate score and tags
     score, tags, level = calculate_score_and_tags(user_data)
     update_candidate_score(candidate_id, score, tags, level)
-    
-    # Update status
-    update_candidate_status(candidate_id, 'анкета заполнена')
-    
-    # Send confirmation
-    await message.answer("✅ Спасибо за заполнение анкеты!\n"
-                        "Ваши данные были сохранены в нашей базе.\n\n"
-                        "Если ваш опыт подойдет под актуальные вакансии, мы свяжемся с вами.\n"
-                        "Также при необходимости вы сможете обновить информацию позже.",
-                        reply_markup=get_confirmation_keyboard())
-    
-    # Clear state
+    update_candidate_status(candidate_id, "анкета заполнена")
+
+    await message.answer(
+        "✅ Спасибо! Анкета сохранена.\n"
+        "Если профиль подойдет под текущие вакансии, мы свяжемся с тобой.",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+    await message.answer("Доступные действия:", reply_markup=get_confirmation_keyboard())
     await state.clear()
 
+
 def calculate_score_and_tags(data: Dict[str, Any]) -> tuple[int, str, str]:
-    """Calculate candidate score, tags and level."""
     score = 0
-    tags = []
+    tags: List[str] = []
     level = "без опыта"
-    
-    # Base score calculation
-    skills = data.get('skills', [])
+
+    skills = data.get("skills", [])
     if isinstance(skills, str):
-        skills = [s.strip() for s in skills.split(',') if s.strip()]
-    
-    # Add points for skills
+        skills = [s.strip() for s in skills.split(",") if s.strip()]
+
     skill_points = {
-        'Python': 10, 'JavaScript': 10, 'HTML': 5, 'CSS': 5, 'SQL': 10,
-        'Git': 8, 'API': 8, 'Figma': 8, 'Postman': 8, 'Google Analytics': 8,
-        'Canva': 5, 'Яндекс Метрика': 8, 'Power BI': 10, 'Tableau': 10,
-        'Excel': 5, 'Google Sheets': 5, 'CRM': 8, 'Notion': 8, 'Google Docs': 5
+        "python": 10,
+        "javascript": 10,
+        "html": 5,
+        "css": 5,
+        "sql": 10,
+        "git": 8,
+        "api": 8,
+        "figma": 8,
+        "postman": 8,
+        "google analytics": 8,
+        "canva": 5,
+        "яндекс метрика": 8,
+        "power bi": 10,
+        "tableau": 10,
+        "excel": 5,
+        "google sheets": 5,
+        "crm": 8,
+        "notion": 8,
+        "google docs": 5,
     }
-    
     for skill in skills:
-        skill = skill.lower()
-        if skill in skill_points:
-            score += skill_points[skill]
+        key = skill.lower()
+        if key in skill_points:
+            score += skill_points[key]
             tags.append(skill)
-    
-    # Level determination
-    experience = data.get('experience', '').lower()
-    if 'стажировка' in experience or 'фриланс' in experience:
+
+    experience = data.get("experience", "").lower()
+    if "стажировка" in experience or "фриланс" in experience:
         level = "стажер"
-    elif 'коммерческий' in experience or '1-2' in experience:
+    elif "коммерческий" in experience or "1-2" in experience:
         level = "начинающий специалист"
-    
-    # Add experience points
-    if 'стажировка' in experience:
+
+    if "стажировка" in experience:
         score += 15
-    elif 'фриланс' in experience:
+    elif "фриланс" in experience:
         score += 20
-    elif 'коммерческий' in experience or '1-2' in experience:
+    elif "коммерческий" in experience or "1-2" in experience:
         score += 25
-    elif 'курсы' in experience:
+    elif "курсы" in experience:
         score += 10
-    
-    # Add direction points
-    direction = data.get('direction', '').lower()
-    if 'it' in direction or 'продукт' in direction:
+
+    direction = data.get("direction", "").lower()
+    if "информационные технологии" in direction:
         score += 15
-        tags.append('IT')
-    elif 'digital' in direction or 'маркетинг' in direction or 'дизайн' in direction:
+        tags.append("IT")
+    elif "маркетинг" in direction:
         score += 10
-        tags.append('Digital')
-    elif 'бизнес' in direction or 'операции' in direction:
+        tags.append("Маркетинг")
+    elif "дизайн" in direction:
+        score += 10
+        tags.append("Дизайн")
+    elif "аналитика" in direction:
+        score += 12
+        tags.append("Аналитика")
+    elif "продажи" in direction:
         score += 8
-        tags.append('Бизнес')
-    
-    return score, ','.join(tags), level
+        tags.append("Продажи")
+    elif "клиентская поддержка" in direction:
+        score += 7
+        tags.append("Поддержка")
+    elif "ассистент" in direction:
+        score += 7
+        tags.append("Ассистент")
+    elif "операционная деятельность" in direction:
+        score += 8
+        tags.append("Операции")
+    elif "подбор персонала" in direction:
+        score += 8
+        tags.append("HR")
+
+    return score, ",".join(tags), level
+
+
+@router.message(StateFilter(None), ~F.text.startswith("/"), lambda m: is_greeting_or_generic((m.text or "").strip()))
+async def fallback_entrypoint(message: Message, state: FSMContext):
+    await start_flow_or_menu(message, state)
+

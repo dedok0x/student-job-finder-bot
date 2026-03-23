@@ -1,0 +1,4 @@
+﻿id,tg_user_id,tg_chat_id,timestamp,username,candidate_name,first_name,last_name,age,who_are_you,what_are_you_looking_for,direction,experience,skills,resume_links,resume_file_id,resume_message_link,test_answers,work_style,contacts,score,tags,level,status,clarifying_answers,salary_expectations,additional_info,availability_date,manager_notes,created_at,updated_at
+1,1038860577,1038860577,2026-03-19T17:18:04.575524,Artem_Shtodin,Артём,Артём Штодин,,21,студент,стажировка,операционная деятельность,курсы,оптимизация процессов,1,,,"1. Как бы ты обнаружил(а) узкое место в процессе? -> п
+2. Почему важно вести отчеты по срокам и задачам? -> ч
+3. Что можно автоматизировать в рутинных операциях? -> пропущено","сначала сам разбираюсь, потом задаю вопросы",Email: artem.shtodin@yandex.ru; Телефон: +79991234567,18,Операции,без опыта,анкета заполнена,,1000000,Привет,,,2026-03-19 14:18:04,2026-03-19 14:18:17

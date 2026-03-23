@@ -1,126 +1,330 @@
-import logging
+import os
+from datetime import datetime
+
+import pandas as pd
 from aiogram import Router, F
-from aiogram.types import Message, CallbackQuery
+from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
-from database import get_all_candidates, get_candidate, update_candidate_status, search_candidates, get_statistics, match_candidates_to_vacancy, create_vacancy, get_applications_by_vacancy
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import FSInputFile, Message, ReplyKeyboardRemove
 
-logger = logging.getLogger(__name__)
+from database import (
+    get_all_candidates,
+    get_applications_by_vacancy,
+    get_candidate,
+    get_recent_candidates,
+    get_statistics,
+    match_candidates_to_vacancy,
+    search_candidates,
+    search_candidates_fuzzy,
+    update_candidate_status,
+)
+from keyboards.for_questions import get_manager_panel_keyboard
 
-# Router for handling different types of commands
 router = Router()
 
-# Manager commands
+MANAGER_AUTH_CODE = "315920"
+AUTHORIZED_MANAGERS: set[int] = set()
+
+
+class ManagerPanelState(StatesGroup):
+    wait_search_query = State()
+    wait_message_target = State()
+    wait_message_text = State()
+
+
+def is_manager(message: Message) -> bool:
+    return bool(message.from_user and message.from_user.id in AUTHORIZED_MANAGERS)
+
+
+async def send_manager_panel(message: Message) -> None:
+    await message.answer("🧑‍💼 Панель менеджера активна", reply_markup=get_manager_panel_keyboard())
+
+
+def format_candidate_short(candidate: dict) -> str:
+    display_name = candidate.get("candidate_name") or f"{candidate.get('first_name', '')} {candidate.get('last_name', '')}".strip()
+    return (
+        f"ID: {candidate.get('id')} | {display_name}\n"
+        f"Направление: {candidate.get('direction', '')}\n"
+        f"Опыт: {candidate.get('experience', '')}\n"
+        f"Статус: {candidate.get('status', '')}\n"
+        f"Балл: {candidate.get('score', 0)}"
+    )
+
+
+async def send_message_to_candidate(message: Message, candidate: dict, text: str) -> bool:
+    tg_user_id = candidate.get("tg_user_id")
+    if not tg_user_id:
+        return False
+    try:
+        await message.bot.send_message(chat_id=int(tg_user_id), text=text)
+        return True
+    except Exception:
+        return False
+
+
+@router.message(Command("auth"))
+async def auth_manager(message: Message, state: FSMContext):
+    parts = (message.text or "").split(maxsplit=1)
+    code = parts[1].strip() if len(parts) > 1 else ""
+    if code == MANAGER_AUTH_CODE:
+        AUTHORIZED_MANAGERS.add(message.from_user.id)
+        await state.clear()
+        await send_manager_panel(message)
+        return
+    await message.answer("Неверный код авторизации.")
+
+
+@router.message(F.text.casefold() == "quit")
+async def quit_manager_panel(message: Message, state: FSMContext):
+    if not is_manager(message):
+        return
+    AUTHORIZED_MANAGERS.discard(message.from_user.id)
+    await state.clear()
+    await message.answer("Вы вышли из панели менеджера.", reply_markup=ReplyKeyboardRemove())
+
+
+@router.message(Command("quit"))
+async def quit_manager_panel_command(message: Message, state: FSMContext):
+    if not is_manager(message):
+        return
+    AUTHORIZED_MANAGERS.discard(message.from_user.id)
+    await state.clear()
+    await message.answer("Вы вышли из панели менеджера.", reply_markup=ReplyKeyboardRemove())
+
+
+@router.message(F.text == "👥 Последние кандидаты")
+async def manager_recent_candidates(message: Message):
+    if not is_manager(message):
+        return
+
+    candidates = get_recent_candidates(10)
+    if not candidates:
+        await message.answer("Кандидаты не найдены.")
+        return
+
+    response = "\n\n".join([format_candidate_short(c) for c in candidates])
+    await message.answer(f"📋 Последние кандидаты:\n\n{response}")
+
+
+@router.message(F.text == "📊 Общая статистика")
+async def manager_recent_stats(message: Message):
+    if not is_manager(message):
+        return
+
+    all_candidates = get_all_candidates()
+    by_direction: dict[str, int] = {}
+    for candidate in all_candidates:
+        direction = candidate.get("direction", "не указано") or "не указано"
+        by_direction[direction] = by_direction.get(direction, 0) + 1
+
+    stats = get_statistics()
+    text = (
+        "📊 Общая статистика\n\n"
+        f"Всего кандидатов: {stats.get('total_candidates', 0)}\n"
+        f"Активных вакансий: {stats.get('active_vacancies', 0)}\n"
+        f"Всего заявок: {stats.get('total_applications', 0)}\n"
+    )
+
+    if stats.get("by_status"):
+        text += "\nПо статусам:\n"
+        for status, count in stats["by_status"].items():
+            text += f"- {status}: {count}\n"
+
+    if by_direction:
+        text += "\nПо направлениям:\n"
+        for direction, count in sorted(by_direction.items(), key=lambda x: x[1], reverse=True):
+            text += f"- {direction}: {count}\n"
+    await message.answer(text)
+
+
+@router.message(F.text.contains("Поиск по имени"))
+async def manager_start_name_search(message: Message, state: FSMContext):
+    if not is_manager(message):
+        return
+    await state.set_state(ManagerPanelState.wait_search_query)
+    await message.answer("Введи имя или фамилию для поиска (поддерживается неточное совпадение).")
+
+
+@router.message(ManagerPanelState.wait_search_query)
+async def manager_process_name_search(message: Message, state: FSMContext):
+    if not is_manager(message):
+        return
+
+    query = (message.text or "").strip()
+    results = search_candidates_fuzzy(query=query, limit=10)
+    await state.clear()
+
+    if not results:
+        await message.answer("Ничего не найдено.", reply_markup=get_manager_panel_keyboard())
+        return
+
+    response = "\n\n".join([format_candidate_short(c) for c in results])
+    await message.answer(f"🔎 Результаты поиска:\n\n{response}", reply_markup=get_manager_panel_keyboard())
+
+
+@router.message(F.text == "📤 Экспорт CSV")
+async def manager_export_csv(message: Message):
+    if not is_manager(message):
+        return
+
+    candidates = get_all_candidates()
+    if not candidates:
+        await message.answer("Нет данных для экспорта.")
+        return
+
+    df = pd.DataFrame(candidates)
+    os.makedirs("exports", exist_ok=True)
+    file_name = f"candidates_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+    file_path = os.path.join("exports", file_name)
+    df.to_csv(file_path, index=False, encoding="utf-8-sig")
+
+    await message.answer_document(FSInputFile(file_path), caption="Готово: экспорт всех данных кандидатов")
+
+
+@router.message(F.text == "✉️ Отправить сообщение")
+async def manager_start_send_message(message: Message, state: FSMContext):
+    if not is_manager(message):
+        return
+    await state.set_state(ManagerPanelState.wait_message_target)
+    await message.answer("Введи ID кандидата, которому нужно отправить сообщение.")
+
+
+@router.message(ManagerPanelState.wait_message_target)
+async def manager_pick_target(message: Message, state: FSMContext):
+    if not is_manager(message):
+        return
+
+    text = (message.text or "").strip()
+    if not text.isdigit():
+        await message.answer("ID кандидата должен быть числом.")
+        return
+
+    candidate = get_candidate(int(text))
+    if not candidate:
+        await message.answer("Кандидат не найден. Введи корректный ID.")
+        return
+
+    await state.update_data(target_candidate_id=int(text))
+    await state.set_state(ManagerPanelState.wait_message_text)
+    await message.answer("Теперь отправь текст сообщения для кандидата.")
+
+
+@router.message(ManagerPanelState.wait_message_text)
+async def manager_send_text(message: Message, state: FSMContext):
+    if not is_manager(message):
+        return
+
+    data = await state.get_data()
+    candidate_id = data.get("target_candidate_id")
+    candidate = get_candidate(candidate_id) if candidate_id else None
+    if not candidate:
+        await state.clear()
+        await message.answer("Кандидат не найден. Начни заново.", reply_markup=get_manager_panel_keyboard())
+        return
+
+    text = (message.text or "").strip()
+    if len(text) < 2:
+        await message.answer("Текст слишком короткий. Отправь нормальное сообщение.")
+        return
+
+    ok = await send_message_to_candidate(message, candidate, text)
+    await state.clear()
+    if ok:
+        await message.answer("✅ Сообщение отправлено кандидату.", reply_markup=get_manager_panel_keyboard())
+    else:
+        await message.answer("Не удалось отправить сообщение (возможно, нет tg_user_id или диалог не начат).", reply_markup=get_manager_panel_keyboard())
+
+
 @router.message(F.text == "/view_candidates")
 async def view_candidates(message: Message):
-    """View all candidates."""
     candidates = get_all_candidates()
-    
     if not candidates:
         await message.answer("Нет кандидатов в базе.")
         return
-    
-    # Format candidates list
-    candidates_text = "📋 Все кандидаты:\n\n"
-    for i, candidate in enumerate(candidates[:10], 1):  # Show first 10
-        candidates_text += f"{i}. {candidate['first_name']} {candidate['last_name']}\n"
-        candidates_text += f"   Направление: {candidate['direction']}\n"
-        candidates_text += f"   Статус: {candidate['status']}\n"
-        candidates_text += f"   Балл: {candidate['score']}\n\n"
-    
+    text = "📋 Все кандидаты:\n\n"
+    for i, candidate in enumerate(candidates[:10], 1):
+        text += f"{i}. {candidate.get('candidate_name') or candidate.get('first_name', '')} {candidate.get('last_name', '')}\n"
+        text += f"   Направление: {candidate.get('direction', '')}\n"
+        text += f"   Статус: {candidate.get('status', '')}\n"
+        text += f"   Балл: {candidate.get('score', 0)}\n\n"
     if len(candidates) > 10:
-        candidates_text += f"... и ещё {len(candidates) - 10} кандидатов"
-    
-    await message.answer(candidates_text)
+        text += f"... и ещё {len(candidates) - 10} кандидатов"
+    await message.answer(text)
+
 
 @router.message(F.text == "/search_candidates")
 async def search_candidates_command(message: Message):
-    """Search candidates by keyword."""
     await message.answer("Введите ключевое слово для поиска кандидатов:")
+
 
 @router.message(F.text.contains(" "))
 async def process_search(message: Message):
-    """Process search command."""
-    # Check if this is a search command (contains space and starts with common search terms)
-    text = message.text.strip().lower()
-    if ' ' in text and any(keyword in text for keyword in ['search', 'найти', 'поиск']):
-        query = message.text.split(' ', 1)[1]  # Get everything after the first word
+    text = (message.text or "").strip().lower()
+    if " " in text and any(keyword in text for keyword in ["search", "найти", "поиск"]):
+        query = (message.text or "").split(" ", 1)[1]
         candidates = search_candidates(query)
-        
         if not candidates:
             await message.answer("Кандидаты не найдены.")
             return
-        
-        # Format search results
-        results_text = f"🔍 Результаты поиска по '{query}':\n\n"
-        for i, candidate in enumerate(candidates[:5], 1):  # Show first 5
-            results_text += f"{i}. {candidate['first_name']} {candidate['last_name']}\n"
-            results_text += f"   Направление: {candidate['direction']}\n"
-            results_text += f"   Статус: {candidate['status']}\n"
-            results_text += f"   Балл: {candidate['score']}\n\n"
-        
-        if len(candidates) > 5:
-            results_text += f"... и ещё {len(candidates) - 5} кандидатов"
-        
-        await message.answer(results_text)
+        result = f"🔍 Результаты поиска по '{query}':\n\n"
+        for i, candidate in enumerate(candidates[:5], 1):
+            result += f"{i}. {candidate.get('candidate_name') or candidate.get('first_name', '')} {candidate.get('last_name', '')}\n"
+            result += f"   Направление: {candidate.get('direction', '')}\n"
+            result += f"   Статус: {candidate.get('status', '')}\n"
+            result += f"   Балл: {candidate.get('score', 0)}\n\n"
+        await message.answer(result)
+
 
 @router.message(F.text == "/view_stats")
 async def view_statistics(message: Message):
-    """View system statistics."""
     stats = get_statistics()
-    
-    stats_text = "📊 Статистика:\n\n"
-    stats_text += f"Всего кандидатов: {stats['total_candidates']}\n"
-    stats_text += f"Активных вакансий: {stats['active_vacancies']}\n"
-    stats_text += f"Всего заявок: {stats['total_applications']}\n\n"
-    
-    stats_text += "Кандидаты по статусам:\n"
-    for status, count in stats['by_status'].items():
-        stats_text += f"  {status}: {count}\n"
-    
-    stats_text += "\nКандидаты по направлениям:\n"
-    for direction, count in stats['by_direction'].items():
-        stats_text += f"  {direction}: {count}\n"
-    
-    await message.answer(stats_text)
+    text = "📊 Статистика:\n\n"
+    text += f"Всего кандидатов: {stats['total_candidates']}\n"
+    text += f"Активных вакансий: {stats['active_vacancies']}\n"
+    text += f"Всего заявок: {stats['total_applications']}\n\n"
+    text += "Кандидаты по статусам:\n"
+    for status, count in stats["by_status"].items():
+        text += f"  {status}: {count}\n"
+    text += "\nКандидаты по направлениям:\n"
+    for direction, count in stats["by_direction"].items():
+        text += f"  {direction}: {count}\n"
+    await message.answer(text)
+
 
 @router.message(F.text.startswith("/view_"))
 async def view_candidate_details(message: Message):
-    """View candidate details by ID."""
     try:
-        candidate_id = int(message.text[6:])  # Remove "/view_" prefix
+        candidate_id = int((message.text or "")[6:])
         candidate = get_candidate(candidate_id)
-        
         if not candidate:
             await message.answer("Кандидат с таким ID не найден.")
             return
-        
-        details_text = f"👤 Детали кандидата #{candidate_id}:\n\n"
-        details_text += f"Имя: {candidate['first_name']} {candidate['last_name']}\n"
-        details_text += f"Возраст: {candidate['age']}\n"
-        details_text += f"Город: {candidate['city']}\n"
-        details_text += f"Образование: {candidate['education']}\n"
-        details_text += f"Направление: {candidate['direction']}\n"
-        details_text += f"Опыт: {candidate['experience']}\n"
-        details_text += f"Навыки: {candidate['skills']}\n"
-        details_text += f"Балл: {candidate['score']}\n"
-        details_text += f"Теги: {candidate['tags']}\n"
-        details_text += f"Уровень: {candidate['level']}\n"
-        details_text += f"Статус: {candidate['status']}\n"
-        details_text += f"Контакты: {candidate['contacts']}\n"
-        details_text += f"Резюме/ссылки: {candidate['resume']}\n"
-        
-        await message.answer(details_text)
+        details = f"👤 Детали кандидата #{candidate_id}:\n\n"
+        details += f"Имя Telegram: {candidate.get('first_name', '')} {candidate.get('last_name', '')}\n"
+        details += f"Имя кандидата: {candidate.get('candidate_name', '')}\n"
+        details += f"Возраст: {candidate.get('age', '')}\n"
+        details += f"Направление: {candidate.get('direction', '')}\n"
+        details += f"Опыт: {candidate.get('experience', '')}\n"
+        details += f"Навыки: {candidate.get('skills', '')}\n"
+        details += f"ЗП ожидания: {candidate.get('salary_expectations', '')}\n"
+        details += f"Балл: {candidate.get('score', 0)}\n"
+        details += f"Теги: {candidate.get('tags', '')}\n"
+        details += f"Уровень: {candidate.get('level', '')}\n"
+        details += f"Статус: {candidate.get('status', '')}\n"
+        details += f"Контакты: {candidate.get('contacts', '')}\n"
+        details += f"Резюме/ссылки: {candidate.get('resume_links', '')}\n"
+        await message.answer(details)
     except ValueError:
         await message.answer("Пожалуйста, укажите корректный ID кандидата.")
 
+
 @router.message(F.text.startswith("/status_"))
 async def update_candidate_status_command(message: Message):
-    """Update candidate status."""
     try:
-        parts = message.text[7:].split(' ', 1)  # Remove "/status_" prefix and split
+        parts = (message.text or "")[7:].split(" ", 1)
         candidate_id = int(parts[0])
         new_status = parts[1] if len(parts) > 1 else "не подходит"
-        
         if update_candidate_status(candidate_id, new_status):
             await message.answer(f"Статус кандидата #{candidate_id} обновлен на '{new_status}'")
         else:
@@ -128,68 +332,42 @@ async def update_candidate_status_command(message: Message):
     except (ValueError, IndexError):
         await message.answer("Пожалуйста, укажите корректный ID кандидата и новый статус.")
 
-@router.message(F.text == "/help")
-async def help_command(message: Message):
-    """Show help message."""
-    help_text = (
-        "🤖 Команды бота:\n\n"
-        "/start - Начать анкетирование\n"
-        "/view_candidates - Посмотреть всех кандидатов\n"
-        "/search_candidates - Поиск кандидатов (используйте: search [запрос])\n"
-        "/view_stats - Просмотр статистики\n"
-        "/view_[ID] - Просмотр деталей кандидата\n"
-        "/status_[ID] [статус] - Обновить статус кандидата\n"
-        "/help - Показать эту справку"
-    )
-    await message.answer(help_text)
 
-# Additional manager commands
 @router.message(F.text.startswith("/match_"))
 async def match_candidates_to_vacancy_cmd(message: Message):
-    """Match candidates to a vacancy by ID."""
     try:
-        vacancy_id = int(message.text[7:])  # Remove "/match_" prefix
+        vacancy_id = int((message.text or "")[7:])
         matches = match_candidates_to_vacancy(vacancy_id)
-        
         if not matches:
             await message.answer(f"Не найдено подходящих кандидатов для вакансии #{vacancy_id}")
             return
-        
-        # Format matches
-        matches_text = f"✅ Найдено {len(matches)} подходящих кандидатов для вакансии #{vacancy_id}:\n\n"
-        for i, match in enumerate(matches[:10], 1):  # Show first 10
-            matches_text += f"{i}. {match['first_name']} {match['last_name']}\n"
-            matches_text += f"   Направление: {match['direction']}\n"
-            matches_text += f"   Балл: {match['score']}\n"
-            matches_text += f"   Совпадение: {match['match_score']}%\n"
-            matches_text += f"   Навыки: {', '.join(match['matching_skills'])}\n\n"
-        
-        if len(matches) > 10:
-            matches_text += f"... и ещё {len(matches) - 10} кандидатов"
-        
-        await message.answer(matches_text)
+        text = f"✅ Найдено {len(matches)} подходящих кандидатов для вакансии #{vacancy_id}:\n\n"
+        for i, match in enumerate(matches[:10], 1):
+            text += f"{i}. {match.get('candidate_name') or match.get('first_name', '')} {match.get('last_name', '')}\n"
+            text += f"   Направление: {match.get('direction', '')}\n"
+            text += f"   Балл: {match.get('score', 0)}\n"
+            text += f"   Совпадение: {match.get('match_score', 0)}%\n"
+            text += f"   Навыки: {', '.join(match.get('matching_skills', []))}\n\n"
+        await message.answer(text)
     except ValueError:
         await message.answer("Пожалуйста, укажите корректный ID вакансии.")
 
+
 @router.message(F.text.startswith("/applications_"))
 async def view_applications_for_vacancy(message: Message):
-    """View applications for a vacancy by ID."""
     try:
-        vacancy_id = int(message.text[12:])  # Remove "/applications_" prefix
+        vacancy_id = int((message.text or "")[12:])
         applications = get_applications_by_vacancy(vacancy_id)
-        
         if not applications:
             await message.answer(f"Нет заявок для вакансии #{vacancy_id}")
             return
-        
-        # Format applications
-        apps_text = f"📋 Заявки для вакансии #{vacancy_id}:\n\n"
+        text = f"📋 Заявки для вакансии #{vacancy_id}:\n\n"
         for i, app in enumerate(applications, 1):
-            apps_text += f"{i}. {app['first_name']} {app['last_name']}\n"
-            apps_text += f"   Направление: {app['direction']}\n"
-            apps_text += f"   Балл: {app['score']}\n"
-            apps_text += f"   Статус: {app['status']}\n\n"
-        
-        await message.answer(apps_text)
+            text += f"{i}. {app.get('first_name', '')} {app.get('last_name', '')}\n"
+            text += f"   Направление: {app.get('direction', '')}\n"
+            text += f"   Балл: {app.get('score', 0)}\n"
+            text += f"   Статус: {app.get('status', '')}\n\n"
+        await message.answer(text)
     except ValueError:
         await message.answer("Пожалуйста, укажите корректный ID вакансии.")
+
