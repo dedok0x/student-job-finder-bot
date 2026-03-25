@@ -26,17 +26,7 @@ This is a comprehensive HR bot system designed to streamline the candidate selec
 - **Tagging System**: Automatic tag generation for easy filtering and matching
 - **Status Management**: Complete workflow from "новая анкета" to "трудоустроен"
 
-### 3. Manager Commands
-
-- `/view_candidates` - View all candidates
-- `/search_candidates` - Search candidates by keyword
-- `/view_stats` - View system statistics
-- `/view_[ID]` - View candidate details
-- `/status_[ID] [status]` - Update candidate status
-- `/match_[ID]` - Match candidates to vacancy
-- `/applications_[ID]` - View applications for vacancy
-
-### 4. Database Schema
+### 3. Database Schema
 
 The system uses SQLite with three main tables:
 
@@ -44,7 +34,7 @@ The system uses SQLite with three main tables:
 - **vacancies**: Stores job openings and requirements
 - **applications**: Links candidates to specific vacancies
 
-### 5. Matching Algorithm
+### 4. Matching Algorithm
 
 - Matches candidates to vacancies based on skills and direction alignment
 - Calculates match percentage for better decision making
@@ -140,19 +130,15 @@ chmod +x deploy.sh
 
 Скрипт:
 
+- делает `apt-get update`,
+- ставит системные зависимости,
+- устанавливает Docker Engine + Compose Plugin (если их нет),
 - проверяет наличие Docker/Compose,
 - проверяет обязательные переменные в `.env`,
 - копирует проект в `/opt/docker/hr_bot`,
 - запускает контейнер командой `docker compose up -d --build`.
 
 Контейнер поднимается автоматически после перезагрузки благодаря `restart: unless-stopped`.
-
-### Manager Functions
-
-1. Use `/view_candidates` to see all applicants
-2. Search with `/search [keyword]` to find specific candidates
-3. Update status with `/status_[ID] [new_status]`
-4. Match candidates to vacancies with `/match_[vacancy_id]`
 
 ## Testing
 

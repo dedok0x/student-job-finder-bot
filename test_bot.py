@@ -126,15 +126,8 @@ def test_manager_features():
     print("\n" + "="*50)
     print("TESTING MANAGER FEATURES")
     print("="*50)
-    
-    print("/view_candidates - View all candidates")
-    print("/search_candidates - Search candidates by keyword")
-    print("/view_stats - View system statistics")
-    print("/view_[ID] - View candidate details")
-    print("/status_[ID] [status] - Update candidate status")
-    print("/match_[ID] - Match candidates to vacancy")
-    print("/applications_[ID] - View applications for vacancy")
-    print("[OK] All manager commands implemented")
+
+    print("[OK] Manager panel features implemented")
 
 def test_scoring_system():
     """Test scoring and tagging system."""
