@@ -11,7 +11,9 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message, ReplyKeyboardRemove, User
 
 from database import (
+    get_latest_candidate_by_telegram,
     has_completed_questionnaire,
+    has_incomplete_questionnaire,
     save_candidate,
     update_candidate_rating,
     update_candidate_status,
@@ -386,16 +388,159 @@ async def ask_first_question(message: Message, state: FSMContext) -> None:
 
 
 async def show_main_menu(message: Message) -> None:
-    await message.answer("📌 У тебя уже есть заполненная анкета. Выбери действие:", reply_markup=get_confirmation_keyboard())
+    await message.answer(
+        "📌 У тебя уже есть заполненная анкета. Выбери действие:",
+        reply_markup=get_confirmation_keyboard(),
+    )
+
+
+async def show_incomplete_menu(message: Message) -> None:
+    await message.answer(
+        "📌 У тебя есть недозаполненный профиль. Выбери действие:",
+        reply_markup=get_confirmation_keyboard(include_continue=True),
+    )
+
+
+def _restore_state_data_from_candidate(candidate: Dict[str, Any]) -> Dict[str, Any]:
+    restored = {
+        "candidate_name": candidate.get("candidate_name", ""),
+        "age": candidate.get("age"),
+        "who_are_you": candidate.get("who_are_you", ""),
+        "what_are_you_looking_for": candidate.get("what_are_you_looking_for", ""),
+        "direction": candidate.get("direction", ""),
+        "experience": candidate.get("experience", ""),
+        "salary_expectations": candidate.get("salary_expectations", ""),
+        "resume_links": candidate.get("resume_links", ""),
+        "resume_file_id": candidate.get("resume_file_id", ""),
+        "resume_message_link": candidate.get("resume_message_link", ""),
+        "test_answers": candidate.get("test_answers", ""),
+        "work_style": candidate.get("work_style", ""),
+        "multi_task_style": candidate.get("multi_task_style", ""),
+        "unknown_task_action": candidate.get("unknown_task_action", ""),
+        "work_preference": candidate.get("work_preference", ""),
+        "work_start_priority": candidate.get("work_start_priority", ""),
+        "contacts": candidate.get("contacts", ""),
+        "additional_info": candidate.get("additional_info", ""),
+        "clarifying_answers": candidate.get("clarifying_answers", ""),
+    }
+    skills_raw = str(candidate.get("skills", "") or "").strip()
+    restored["skills"] = [part.strip() for part in skills_raw.split(",") if part.strip()]
+    return restored
+
+
+async def _continue_from_saved_profile(message: Message, state: FSMContext, candidate: Dict[str, Any]) -> None:
+    await state.clear()
+    restored = _restore_state_data_from_candidate(candidate)
+    await state.update_data(**restored)
+
+    current_stage = str(candidate.get("current_stage", "") or "").lower()
+    status = str(candidate.get("status", "") or "").lower()
+    direction = restored.get("direction") or "информационные технологии"
+
+    if "этап 2" in current_stage:
+        await state.set_state(Questionnaire.age)
+        await message.answer("Продолжаем с места остановки. 2️⃣ Сколько тебе лет?")
+        return
+    if "этап 3" in current_stage:
+        await state.set_state(Questionnaire.who_are_you)
+        await message.answer(
+            "Продолжаем с места остановки. 3️⃣ Кто ты?",
+            reply_markup=get_who_are_you_keyboard(),
+        )
+        return
+    if "этап 4" in current_stage:
+        await state.set_state(Questionnaire.what_are_you_looking_for)
+        await message.answer(
+            "Продолжаем с места остановки. 4️⃣ Что ищешь?",
+            reply_markup=get_what_are_you_looking_for_keyboard(),
+        )
+        return
+    if "этап 5" in current_stage or "уточнение направления" in current_stage:
+        await state.set_state(Questionnaire.direction)
+        await message.answer(
+            "Продолжаем с места остановки. 5️⃣ Какое направление тебе ближе?",
+            reply_markup=get_direction_keyboard(),
+        )
+        return
+    if "этап 6" in current_stage:
+        await state.set_state(Questionnaire.salary_expectations)
+        await message.answer("Продолжаем с места остановки. 6️⃣ Какие зарплатные ожидания?")
+        return
+    if "этап 7 — опыт" in current_stage:
+        await state.set_state(Questionnaire.experience)
+        await message.answer(
+            "Продолжаем с места остановки. 7️⃣ Какой у тебя текущий опыт?",
+            reply_markup=get_experience_keyboard(),
+        )
+        return
+    if "выбор завершить или продолжить" in current_stage:
+        await state.set_state(Questionnaire.profile_completion_decision)
+        await message.answer(
+            "Сделали твой базовый профиль. Продолжаем?",
+            reply_markup=get_continue_later_keyboard("flow"),
+        )
+        return
+    if status.startswith("недозаполнена") or "этап 7 — завершено пользователем" in current_stage or "этап 8" in current_stage:
+        await state.set_state(Questionnaire.skills)
+        await message.answer(
+            "Продолжаем заполнение. 8️⃣ Отметь навыки и инструменты, с которыми уже работал(а).",
+            reply_markup=get_skills_keyboard(direction, restored.get("skills", [])),
+        )
+        return
+    if "этап 9" in current_stage:
+        await state.set_state(Questionnaire.resume_links)
+        await message.answer("Продолжаем с места остановки. 9️⃣ Отправь резюме (PDF/PNG, фото или ссылку).")
+        return
+    if "дополнительная информация" in current_stage:
+        await state.set_state(Questionnaire.add_more_decision)
+        await message.answer("Хочешь добавить что-то ещё к анкете?", reply_markup=get_yes_no_keyboard("add"))
+        return
+    if "мини-тест" in current_stage or "этап 10" in current_stage:
+        await state.set_state(Questionnaire.test_questions)
+        await message.answer(
+            f"🔟 Мини-тест по направлению: {direction}\nНажми «Пройти тест» или «Пропустить».",
+            reply_markup=get_test_questions_keyboard(),
+        )
+        return
+    if "рабочий стиль" in current_stage:
+        await state.set_state(Questionnaire.work_style)
+        await message.answer(
+            "1️⃣1️⃣ Какой у тебя рабочий стиль?",
+            reply_markup=get_work_style_keyboard(),
+        )
+        return
+    if "кейс тестирования" in current_stage:
+        await state.set_state(Questionnaire.short_assessment)
+        await state.update_data(short_assessment_index=0)
+        first = SHORT_ASSESSMENT[0]
+        await message.answer(
+            first["question"],
+            reply_markup=get_short_assessment_keyboard(first["options"], prefix="sa0"),
+        )
+        return
+    if "контакты" in current_stage:
+        await state.set_state(Questionnaire.contacts)
+        await state.update_data(contact_step="email")
+        await message.answer("1️⃣2️⃣ Контакты\nШаг 1/2: укажи email")
+        return
+
+    await ask_first_question(message, state)
 
 
 async def start_flow_or_menu(message: Message, state: FSMContext) -> None:
     if not message.from_user:
         return
+    if message.from_user.is_bot:
+        return
 
     if has_completed_questionnaire(message.from_user.id, message.chat.id):
         await state.clear()
         await show_main_menu(message)
+        return
+
+    if has_incomplete_questionnaire(message.from_user.id, message.chat.id):
+        await state.clear()
+        await show_incomplete_menu(message)
         return
 
     await ask_first_question(message, state)
@@ -412,6 +557,21 @@ async def menu_update_profile(callback: CallbackQuery, state: FSMContext):
     if callback.message:
         await callback.message.answer("Обновляем анкету 👇")
         await ask_first_question(callback.message, state)
+
+
+@router.callback_query(lambda c: c.data == "continue_profile")
+async def menu_continue_profile(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    if not callback.message or not callback.from_user:
+        return
+
+    candidate = get_latest_candidate_by_telegram(callback.from_user.id, callback.message.chat.id)
+    if not candidate:
+        await callback.message.answer("Черновик не найден. Начинаем заполнение с нуля.")
+        await ask_first_question(callback.message, state)
+        return
+
+    await _continue_from_saved_profile(callback.message, state, candidate)
 
 
 @router.callback_query(lambda c: c.data == "upload_resume")
@@ -648,7 +808,7 @@ async def process_profile_completion_decision(callback: CallbackQuery, state: FS
             await callback.message.answer(
                 "🙏 Спасибо за использование бота!\n"
                 "Профиль сохранён как черновик. Его можно будет продолжить и дозаполнить позже.",
-                reply_markup=get_confirmation_keyboard(),
+                reply_markup=get_confirmation_keyboard(include_continue=True),
             )
         await state.clear()
         await callback.answer()

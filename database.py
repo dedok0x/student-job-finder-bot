@@ -1,10 +1,31 @@
 import sqlite3
+import os
 from datetime import datetime
 from typing import Dict, List, Optional, Any
 
 from rapidfuzz import fuzz
 
 DB_NAME = 'hr_bot.db'
+BOT_USERNAME = os.getenv("BOT_USERNAME", "").strip().lstrip("@").lower()
+LEGACY_SELF_BOT_USERNAME = "hhhhhrrrrr_bot"
+
+
+def _self_bot_usernames() -> set[str]:
+    usernames = {LEGACY_SELF_BOT_USERNAME}
+    if BOT_USERNAME:
+        usernames.add(BOT_USERNAME)
+    return usernames
+
+
+def _cleanup_self_bot_rows(cursor: sqlite3.Cursor) -> None:
+    usernames = [name for name in _self_bot_usernames() if name]
+    if not usernames:
+        return
+    placeholders = ", ".join(["?"] * len(usernames))
+    cursor.execute(
+        f"DELETE FROM candidates WHERE lower(trim(username)) IN ({placeholders})",
+        usernames,
+    )
 
 
 def _sync_snapshot_to_sheets(conn: sqlite3.Connection) -> None:
@@ -129,7 +150,10 @@ def init_db():
             '''
         )
 
+    _cleanup_self_bot_rows(cursor)
+
     conn.commit()
+    _sync_snapshot_to_sheets(conn)
     conn.close()
 
 def save_candidate(data: Dict[str, Any]) -> int:
@@ -140,6 +164,13 @@ def save_candidate(data: Dict[str, Any]) -> int:
     """
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
+
+    username = (data.get('username') or '').strip().lstrip('@').lower()
+    if data.get('is_bot') or (username and username in _self_bot_usernames()):
+        _cleanup_self_bot_rows(cursor)
+        conn.commit()
+        conn.close()
+        return 0
 
     tg_user_id = data.get('tg_user_id')
     tg_chat_id = data.get('tg_chat_id')
@@ -335,6 +366,29 @@ def has_completed_questionnaire(tg_user_id: int, tg_chat_id: int) -> bool:
         FROM candidates
         WHERE tg_user_id = ? AND tg_chat_id = ?
           AND status IN ('анкета заполнена', 'готовая анкета', 'подходит', 'требует проверки')
+        ORDER BY id DESC
+        LIMIT 1
+        ''',
+        (tg_user_id, tg_chat_id),
+    )
+    row = cursor.fetchone()
+    conn.close()
+    return row is not None
+
+
+def has_incomplete_questionnaire(tg_user_id: int, tg_chat_id: int) -> bool:
+    """Check if user has a draft/incomplete questionnaire."""
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute(
+        '''
+        SELECT 1
+        FROM candidates
+        WHERE tg_user_id = ? AND tg_chat_id = ?
+          AND (
+            lower(status) LIKE 'черновик%'
+            OR lower(status) LIKE 'недозаполнена%'
+          )
         ORDER BY id DESC
         LIMIT 1
         ''',

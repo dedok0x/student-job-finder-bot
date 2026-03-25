@@ -132,13 +132,22 @@ def get_work_style_keyboard() -> InlineKeyboardMarkup:
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-def get_confirmation_keyboard() -> InlineKeyboardMarkup:
-    """Return keyboard for confirmation."""
-    buttons = [
-        [InlineKeyboardButton(text="обновить анкету", callback_data="update_profile")],
+def get_confirmation_keyboard(include_continue: bool = False) -> InlineKeyboardMarkup:
+    """Return main menu keyboard.
+
+    include_continue=True is used for users with incomplete profile.
+    """
+    buttons = []
+    if include_continue:
+        buttons.append([InlineKeyboardButton(text="заполнить сначала", callback_data="update_profile")])
+        buttons.append([InlineKeyboardButton(text="продолжить заполнение", callback_data="continue_profile")])
+    else:
+        buttons.append([InlineKeyboardButton(text="обновить анкету", callback_data="update_profile")])
+
+    buttons.extend([
         [InlineKeyboardButton(text="загрузить новое резюме", callback_data="upload_resume")],
         [InlineKeyboardButton(text="связаться с менеджером", callback_data="contact_manager")]
-    ]
+    ])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
