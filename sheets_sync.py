@@ -35,6 +35,7 @@ DISPLAY_COLUMNS: List[tuple[str, str]] = [
     ("updated_at", "Обновлено"),
     ("candidate_name", "Кандидат"),
     ("username_link", "Telegram"),
+    ("rating", "Оценка"),
     ("age", "Возраст"),
     ("who_are_you", "Кто кандидат"),
     ("what_are_you_looking_for", "Ищет"),
@@ -42,13 +43,10 @@ DISPLAY_COLUMNS: List[tuple[str, str]] = [
     ("experience", "Опыт"),
     ("skills", "Навыки"),
     ("salary_expectations", "Зарплатные ожидания"),
-    ("work_style", "Рабочий стиль"),
-    ("multi_task_style", "Многозадачность"),
-    ("work_behavior_summary", "Формат работы (кейс)"),
+    ("case_testing", "Кейс тестирование"),
     ("contacts", "Контакты"),
     ("resume_links", "Резюме / Портфолио"),
     ("status", "Статус"),
-    ("score", "Скор"),
     ("tags", "Теги"),
     ("level", "Уровень"),
     ("test_answers", "Ответы мини-теста"),
@@ -69,18 +67,24 @@ def _build_telegram_link_cell(candidate: Dict[str, Any]) -> str:
     return ""
 
 
-def _format_work_behavior_summary(candidate: Dict[str, Any]) -> str:
+def _format_case_testing(candidate: Dict[str, Any]) -> str:
+    work_style = str(candidate.get("work_style", "") or "").strip()
+    multi_task_style = str(candidate.get("multi_task_style", "") or "").strip()
     unknown_task_action = str(candidate.get("unknown_task_action", "") or "").strip()
     work_preference = str(candidate.get("work_preference", "") or "").strip()
     work_start_priority = str(candidate.get("work_start_priority", "") or "").strip()
 
     parts = []
+    if work_style:
+        parts.append(f"1. Рабочий стиль: {work_style}")
+    if multi_task_style:
+        parts.append(f"2. Многозадачность: {multi_task_style}")
     if unknown_task_action:
-        parts.append(f"1. Если задача непонятна: {unknown_task_action}")
+        parts.append(f"3. Если задача непонятна: {unknown_task_action}")
     if work_preference:
-        parts.append(f"2. Предпочтения в работе: {work_preference}")
+        parts.append(f"4. Предпочтения в работе: {work_preference}")
     if work_start_priority:
-        parts.append(f"3. Приоритет в начале работы: {work_start_priority}")
+        parts.append(f"5. Приоритет в начале работы: {work_start_priority}")
 
     return "\n".join(parts)
 
@@ -100,8 +104,10 @@ def _candidate_to_row(candidate: Dict[str, Any]) -> List[str]:
     for key, _ in DISPLAY_COLUMNS:
         if key == "username_link":
             row.append(_build_telegram_link_cell(candidate))
-        elif key == "work_behavior_summary":
-            row.append(_format_work_behavior_summary(candidate))
+        elif key == "rating":
+            row.append(str(candidate.get("rating", candidate.get("score", 0))))
+        elif key == "case_testing":
+            row.append(_format_case_testing(candidate))
         elif key == "test_answers":
             row.append(_format_test_answers(candidate))
         else:

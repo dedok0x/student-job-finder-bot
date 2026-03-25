@@ -33,6 +33,7 @@ class ManagerPanelState(StatesGroup):
     wait_search_query = State()
     wait_message_target = State()
     wait_message_text = State()
+    wait_broadcast_all_text = State()
 
 
 def is_manager(message: Message) -> bool:
@@ -45,12 +46,13 @@ async def send_manager_panel(message: Message) -> None:
 
 def format_candidate_short(candidate: dict) -> str:
     display_name = candidate.get("candidate_name") or f"{candidate.get('first_name', '')} {candidate.get('last_name', '')}".strip()
+    rating = candidate.get("rating", candidate.get("score", 0))
     return (
         f"ID: {candidate.get('id')} | {display_name}\n"
         f"Направление: {candidate.get('direction', '')}\n"
         f"Опыт: {candidate.get('experience', '')}\n"
         f"Статус: {candidate.get('status', '')}\n"
-        f"Балл: {candidate.get('score', 0)}"
+        f"Оценка: {rating}"
     )
 
 
@@ -71,6 +73,23 @@ async def send_message_to_candidate(message: Message, candidate: dict, text: str
         return True
     except Exception:
         return False
+
+
+def _unique_candidates_by_tg(candidates: list[dict]) -> list[dict]:
+    dedup: dict[int, dict] = {}
+    for candidate in candidates:
+        tg_user_id = candidate.get("tg_user_id")
+        if not tg_user_id:
+            continue
+        prev = dedup.get(int(tg_user_id))
+        if not prev or int(candidate.get("id", 0)) > int(prev.get("id", 0)):
+            dedup[int(tg_user_id)] = candidate
+    return list(dedup.values())
+
+
+def _is_incomplete_status(status: str) -> bool:
+    normalized = (status or "").strip().lower()
+    return normalized.startswith("черновик") or normalized.startswith("недозаполнена")
 
 
 @router.message(Command("auth"))
@@ -267,6 +286,80 @@ async def manager_open_google_sheet(message: Message):
     )
 
 
+@router.message(F.text == "📣 Напомнить недопрошедшим")
+async def manager_remind_incomplete(message: Message):
+    if not is_manager(message):
+        return
+
+    all_candidates = get_all_candidates()
+    unique_candidates = _unique_candidates_by_tg(all_candidates)
+    targets = [candidate for candidate in unique_candidates if _is_incomplete_status(candidate.get("status", ""))]
+
+    if not targets:
+        await message.answer("Нет недозаполненных анкет для напоминания.", reply_markup=get_manager_panel_keyboard())
+        return
+
+    sent = 0
+    failed = 0
+    reminder_text = (
+        "👋 Напоминание: вы остановились на заполнении анкеты.\n"
+        "Продолжите с места остановки — это повысит точность подбора вакансий.\n"
+        "Или начни заново, нажми /start"
+    )
+    for candidate in targets:
+        ok = await send_message_to_candidate(message, candidate, reminder_text)
+        if ok:
+            sent += 1
+        else:
+            failed += 1
+
+    await message.answer(
+        f"📣 Напоминания отправлены.\nУспешно: {sent}\nНе доставлено: {failed}",
+        reply_markup=get_manager_panel_keyboard(),
+    )
+
+
+@router.message(F.text == "📢 Сообщение всем пользователям")
+async def manager_start_broadcast_all(message: Message, state: FSMContext):
+    if not is_manager(message):
+        return
+    await state.set_state(ManagerPanelState.wait_broadcast_all_text)
+    await message.answer("Введи текст для отправки всем пользователям.")
+
+
+@router.message(ManagerPanelState.wait_broadcast_all_text)
+async def manager_send_broadcast_all(message: Message, state: FSMContext):
+    if not is_manager(message):
+        return
+
+    text = (message.text or "").strip()
+    if len(text) < 2:
+        await message.answer("Текст слишком короткий. Введи сообщение длиннее.")
+        return
+
+    all_candidates = get_all_candidates()
+    targets = _unique_candidates_by_tg(all_candidates)
+    if not targets:
+        await state.clear()
+        await message.answer("Нет пользователей для рассылки.", reply_markup=get_manager_panel_keyboard())
+        return
+
+    sent = 0
+    failed = 0
+    for candidate in targets:
+        ok = await send_message_to_candidate(message, candidate, text)
+        if ok:
+            sent += 1
+        else:
+            failed += 1
+
+    await state.clear()
+    await message.answer(
+        f"📢 Рассылка завершена.\nУспешно: {sent}\nНе доставлено: {failed}",
+        reply_markup=get_manager_panel_keyboard(),
+    )
+
+
 @router.message(ManagerPanelState.wait_message_target)
 async def manager_pick_target(message: Message, state: FSMContext):
     if not is_manager(message):
@@ -324,7 +417,7 @@ async def view_candidates(message: Message):
         text += f"{i}. {candidate.get('candidate_name') or candidate.get('first_name', '')} {candidate.get('last_name', '')}\n"
         text += f"   Направление: {candidate.get('direction', '')}\n"
         text += f"   Статус: {candidate.get('status', '')}\n"
-        text += f"   Балл: {candidate.get('score', 0)}\n\n"
+        text += f"   Оценка: {candidate.get('rating', candidate.get('score', 0))}\n\n"
     if len(candidates) > 10:
         text += f"... и ещё {len(candidates) - 10} кандидатов"
     await message.answer(text)
@@ -349,7 +442,7 @@ async def process_search(message: Message):
             result += f"{i}. {candidate.get('candidate_name') or candidate.get('first_name', '')} {candidate.get('last_name', '')}\n"
             result += f"   Направление: {candidate.get('direction', '')}\n"
             result += f"   Статус: {candidate.get('status', '')}\n"
-            result += f"   Балл: {candidate.get('score', 0)}\n\n"
+            result += f"   Оценка: {candidate.get('rating', candidate.get('score', 0))}\n\n"
         await message.answer(result)
 
 
@@ -385,7 +478,7 @@ async def view_candidate_details(message: Message):
         details += f"Опыт: {candidate.get('experience', '')}\n"
         details += f"Навыки: {candidate.get('skills', '')}\n"
         details += f"ЗП ожидания: {candidate.get('salary_expectations', '')}\n"
-        details += f"Балл: {candidate.get('score', 0)}\n"
+        details += f"Оценка: {candidate.get('rating', candidate.get('score', 0))}\n"
         details += f"Теги: {candidate.get('tags', '')}\n"
         details += f"Уровень: {candidate.get('level', '')}\n"
         details += f"Статус: {candidate.get('status', '')}\n"
@@ -422,7 +515,7 @@ async def match_candidates_to_vacancy_cmd(message: Message):
         for i, match in enumerate(matches[:10], 1):
             text += f"{i}. {match.get('candidate_name') or match.get('first_name', '')} {match.get('last_name', '')}\n"
             text += f"   Направление: {match.get('direction', '')}\n"
-            text += f"   Балл: {match.get('score', 0)}\n"
+            text += f"   Оценка: {match.get('rating', match.get('score', 0))}\n"
             text += f"   Совпадение: {match.get('match_score', 0)}%\n"
             text += f"   Навыки: {', '.join(match.get('matching_skills', []))}\n\n"
         await message.answer(text)
@@ -442,7 +535,7 @@ async def view_applications_for_vacancy(message: Message):
         for i, app in enumerate(applications, 1):
             text += f"{i}. {app.get('first_name', '')} {app.get('last_name', '')}\n"
             text += f"   Направление: {app.get('direction', '')}\n"
-            text += f"   Балл: {app.get('score', 0)}\n"
+            text += f"   Оценка: {app.get('rating', app.get('score', 0))}\n"
             text += f"   Статус: {app.get('status', '')}\n\n"
         await message.answer(text)
     except ValueError:

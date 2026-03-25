@@ -116,6 +116,37 @@ The system uses SQLite with three main tables:
 2. Start conversation with `/start`
 3. Complete the 9-step questionnaire
 
+## Docker Deployment (VDS)
+
+Проект можно развернуть на Linux/VDS одной командой после клонирования.
+
+### Что добавлено
+
+- `Dockerfile`
+- `docker-compose.yml`
+- `.dockerignore`
+- `deploy.sh` (автодеплой в `/opt/docker/hr_bot`)
+
+### Быстрый запуск
+
+1. Клонируйте репозиторий.
+2. Положите в корень корректные `.env` и `creds.json`.
+3. Запустите:
+
+```bash
+chmod +x deploy.sh
+./deploy.sh
+```
+
+Скрипт:
+
+- проверяет наличие Docker/Compose,
+- проверяет обязательные переменные в `.env`,
+- копирует проект в `/opt/docker/hr_bot`,
+- запускает контейнер командой `docker compose up -d --build`.
+
+Контейнер поднимается автоматически после перезагрузки благодаря `restart: unless-stopped`.
+
 ### Manager Functions
 
 1. Use `/view_candidates` to see all applicants

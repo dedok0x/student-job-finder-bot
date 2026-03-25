@@ -1,3 +1,4 @@
+import asyncio
 import re
 import os
 from datetime import datetime
@@ -7,22 +8,24 @@ from aiogram import Router, F
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, Message, ReplyKeyboardRemove
+from aiogram.types import CallbackQuery, Message, ReplyKeyboardRemove, User
 
 from database import (
     has_completed_questionnaire,
     save_candidate,
-    update_candidate_score,
+    update_candidate_rating,
     update_candidate_status,
     update_latest_candidate_resume,
 )
 from keyboards.for_questions import (
+    get_continue_later_keyboard,
     get_confirmation_keyboard,
     get_contact_request_keyboard,
     get_direction_keyboard,
     get_experience_keyboard,
     get_short_assessment_keyboard,
     get_skills_keyboard,
+    get_test_answer_skip_keyboard,
     get_test_questions_keyboard,
     get_who_are_you_keyboard,
     get_work_style_keyboard,
@@ -42,6 +45,7 @@ class Questionnaire(StatesGroup):
     clarifying_questions = State()
     salary_expectations = State()
     experience = State()
+    profile_completion_decision = State()
     skills = State()
     resume_links = State()
     add_more_decision = State()
@@ -208,9 +212,106 @@ MANAGER_MENU_TEXTS = {
     "🔎 Поиск по имени",
     "📤 Экспорт CSV",
     "📄 Открыть Google таблицу",
+    "📣 Напомнить недопрошедшим",
+    "📢 Сообщение всем пользователям",
     "🚪 Выйти из панели менеджера"
 }
 RESUME_FORWARD_TARGET_CHAT_ID = "1038860577"
+
+
+def _normalize_state_for_persistence(
+    raw_data: Dict[str, Any],
+    *,
+    chat_id: int,
+    user: User | None,
+    status: str,
+    current_stage: str,
+) -> Dict[str, Any]:
+    resolved_status = status
+    if (status or "").startswith("черновик"):
+        resolved_status = f"черновик: {current_stage}"
+
+    payload = dict(raw_data)
+    payload.update(
+        {
+            "timestamp": datetime.now().isoformat(),
+            "username": (user.username if user else "") or "",
+            "first_name": (user.first_name if user else "") or "",
+            "last_name": (user.last_name if user else "") or "",
+            "tg_user_id": user.id if user else None,
+            "tg_chat_id": chat_id,
+            "status": resolved_status,
+            "current_stage": current_stage,
+        }
+    )
+
+    if isinstance(payload.get("skills"), list):
+        payload["skills"] = ", ".join(payload["skills"])
+    if isinstance(payload.get("clarifying_answers"), list):
+        payload["clarifying_answers"] = " | ".join(payload["clarifying_answers"])
+    if isinstance(payload.get("test_answers"), (list, dict)):
+        payload["test_answers"] = str(payload["test_answers"])
+
+    return payload
+
+
+def _save_progress_background(message: Message, state: FSMContext, status: str, current_stage: str) -> None:
+    async def runner() -> None:
+        try:
+            raw_data = await state.get_data()
+            payload = _normalize_state_for_persistence(
+                raw_data,
+                chat_id=message.chat.id,
+                user=message.from_user,
+                status=status,
+                current_stage=current_stage,
+            )
+            await asyncio.to_thread(save_candidate, payload)
+        except Exception:
+            # Черновик не должен ломать основной пользовательский поток.
+            pass
+
+    asyncio.create_task(runner())
+
+
+def _save_progress_background_from_callback(
+    callback: CallbackQuery,
+    state: FSMContext,
+    status: str,
+    current_stage: str,
+) -> None:
+    async def runner() -> None:
+        try:
+            if not callback.message:
+                return
+            raw_data = await state.get_data()
+            payload = _normalize_state_for_persistence(
+                raw_data,
+                chat_id=callback.message.chat.id,
+                user=callback.from_user,
+                status=status,
+                current_stage=current_stage,
+            )
+            await asyncio.to_thread(save_candidate, payload)
+        except Exception:
+            pass
+
+    asyncio.create_task(runner())
+
+
+def _build_profile_preview(data: Dict[str, Any]) -> str:
+    skills = data.get("skills", "")
+    if isinstance(skills, list):
+        skills = ", ".join(skills)
+    return (
+        "📄 Краткий профиль\n\n"
+        f"ФИО: {data.get('candidate_name', '—')}\n"
+        f"Возраст: {data.get('age', '—')}\n"
+        f"Направление: {data.get('direction', '—')}\n"
+        f"Опыт: {data.get('experience', '—')}\n"
+        f"Зарплатные ожидания: {data.get('salary_expectations', '—')}\n"
+        f"Навыки: {skills or '—'}"
+    )
 
 
 def is_greeting_or_generic(text: str) -> bool:
@@ -277,7 +378,8 @@ async def ask_first_question(message: Message, state: FSMContext) -> None:
     await state.clear()
     await state.set_state(Questionnaire.candidate_name)
     await message.answer(
-        "👋 Привет! Я помогу быстро собрать анкету для подбора вакансий.\n"
+        "Привет👋 Я бот-помощник по поиску работы и стажировок.\n"
+        "Давай быстро познакомимся, чтобы я мог подобрать тебе подходящие варианты.\n\n"
         "1️⃣ Введи ниже своё ФИО.",
         reply_markup=ReplyKeyboardRemove(),
     )
@@ -362,6 +464,7 @@ async def process_candidate_name(message: Message, state: FSMContext):
         await message.answer("Введи имя текстом (минимум 2 символа).")
         return
     await state.update_data(candidate_name=name)
+    _save_progress_background(message, state, status="черновик: анкета в процессе", current_stage="этап 2 — возраст")
     await state.set_state(Questionnaire.age)
     await message.answer("2️⃣ Сколько тебе лет?")
 
@@ -377,6 +480,7 @@ async def process_age(message: Message, state: FSMContext):
         await message.answer("Укажи корректный возраст (14-80).")
         return
     await state.update_data(age=age)
+    _save_progress_background(message, state, status="черновик: анкета в процессе", current_stage="этап 3 — кто ты")
     await state.set_state(Questionnaire.who_are_you)
     await message.answer(
         "3️⃣ Кто ты?\n"
@@ -393,6 +497,8 @@ async def process_who_are_you(callback: CallbackQuery, state: FSMContext):
         return
     choice_key = data[4:]
     await state.update_data(who_are_you=WHO_ARE_YOU_MAP.get(choice_key, choice_key))
+    if callback.message:
+        _save_progress_background_from_callback(callback, state, status="черновик: анкета в процессе", current_stage="этап 4 — формат занятости")
     await state.set_state(Questionnaire.what_are_you_looking_for)
     await callback.message.answer(
         "4️⃣ Что ищешь?\n"
@@ -410,6 +516,8 @@ async def process_looking_for(callback: CallbackQuery, state: FSMContext):
         return
     choice_key = data[8:]
     await state.update_data(what_are_you_looking_for=LOOKING_FOR_MAP.get(choice_key, choice_key))
+    if callback.message:
+        _save_progress_background_from_callback(callback, state, status="черновик: анкета в процессе", current_stage="этап 5 — направление")
     await state.set_state(Questionnaire.direction)
     await callback.message.answer(
         "5️⃣ Какое направление тебе ближе?",
@@ -459,10 +567,14 @@ async def process_direction(callback: CallbackQuery, state: FSMContext):
     await state.update_data(direction=direction)
 
     if key == "help_determine":
+        if callback.message:
+            _save_progress_background_from_callback(callback, state, status="черновик: анкета в процессе", current_stage="уточнение направления")
         await state.set_state(Questionnaire.clarifying_questions)
         await callback.message.answer("Помогу определить направление. Ответь на 5 коротких вопросов:")
         await ask_clarifying_question(callback.message, state, 0)
     else:
+        if callback.message:
+            _save_progress_background_from_callback(callback, state, status="черновик: анкета в процессе", current_stage="этап 6 — зарплатные ожидания")
         await state.set_state(Questionnaire.salary_expectations)
         await callback.message.answer("6️⃣ Какие зарплатные ожидания? (например: 60 000 ₽)")
     await callback.answer()
@@ -474,6 +586,7 @@ async def process_clarifying_answer(message: Message, state: FSMContext):
     answers = data.get("clarifying_answers", [])
     answers.append((message.text or "").strip())
     await state.update_data(clarifying_answers=answers)
+    _save_progress_background(message, state, status="черновик: анкета в процессе", current_stage="уточнение направления")
     await ask_clarifying_question(message, state, data.get("current_question_index", 0) + 1)
 
 
@@ -484,6 +597,7 @@ async def process_salary(message: Message, state: FSMContext):
         await message.answer("Укажи ожидания текстом, например: 60 000 ₽")
         return
     await state.update_data(salary_expectations=salary)
+    _save_progress_background(message, state, status="черновик: анкета в процессе", current_stage="этап 7 — опыт")
     await state.set_state(Questionnaire.experience)
     await message.answer("7️⃣ Какой у тебя текущий опыт?", reply_markup=get_experience_keyboard())
 
@@ -497,13 +611,74 @@ async def process_experience(callback: CallbackQuery, state: FSMContext):
 
     await state.update_data(experience=EXPERIENCE_MAP.get(data[4:], data[4:]))
     direction = (await state.get_data()).get("direction", "информационные технологии")
-    await state.set_state(Questionnaire.skills)
+    await state.set_state(Questionnaire.profile_completion_decision)
+
+    if callback.message:
+        _save_progress_background_from_callback(
+            callback,
+            state,
+            status="черновик: остановка на этапе 7 (ожидание решения)",
+            current_stage="этап 7 — выбор завершить или продолжить",
+        )
+
+
     await callback.message.answer(
-        "8️⃣ Отметь навыки и инструменты, с которыми уже работал(а).\n"
-        "Можно выбрать несколько вариантов и нажать «Готово».",
-        reply_markup=get_skills_keyboard(direction),
+        "Сделали твой базовый профиль.\n"
+        "Осталось 5 коротких шагов, которые помогут лучше подобрать вакансию для тебя.",
+        reply_markup=get_continue_later_keyboard("flow"),
     )
     await callback.answer()
+
+
+@router.callback_query(Questionnaire.profile_completion_decision)
+async def process_profile_completion_decision(callback: CallbackQuery, state: FSMContext):
+    choice = callback.data or ""
+
+    if choice == "flow_no":
+        state_data = await state.get_data()
+        preview = _build_profile_preview(state_data)
+        if callback.message:
+            _save_progress_background_from_callback(
+                callback,
+                state,
+                status="недозаполнена: остановка на этапе 7",
+                current_stage="этап 7 — завершено пользователем",
+            )
+            await callback.message.answer(preview)
+            await callback.message.answer(
+                "🙏 Спасибо за использование бота!\n"
+                "Профиль сохранён как черновик. Его можно будет продолжить и дозаполнить позже.",
+                reply_markup=get_confirmation_keyboard(),
+            )
+        await state.clear()
+        await callback.answer()
+        return
+
+    if choice == "flow_yes":
+        direction = (await state.get_data()).get("direction", "информационные технологии")
+        await state.set_state(Questionnaire.skills)
+        if callback.message:
+            _save_progress_background_from_callback(
+                callback,
+                state,
+                status="черновик: анкета в процессе",
+                current_stage="этап 8 — навыки",
+            )
+            sales_hint = (
+                "\nПосле навыков будет мини-кейс."
+                if direction == "продажи"
+                else ""
+            )
+            await callback.message.answer(
+                "8️⃣ Отметь навыки и инструменты, с которыми уже работал(а).\n"
+                "Можно выбрать несколько вариантов и нажать «Готово»."
+                f"{sales_hint}",
+                reply_markup=get_skills_keyboard(direction),
+            )
+        await callback.answer()
+        return
+
+    await callback.answer("Выбери: продолжить или завершить", show_alert=True)
 
 
 @router.callback_query(Questionnaire.skills)
@@ -521,11 +696,26 @@ async def process_skills(callback: CallbackQuery, state: FSMContext):
             await state.update_data(skills=selected)
             await callback.answer(f"Добавлено: {skill}")
         else:
-            await callback.answer("Уже выбрано")
+            selected.remove(skill)
+            await state.update_data(skills=selected)
+            await callback.answer(f"Убрано: {skill}")
+        await callback.message.edit_reply_markup(reply_markup=get_skills_keyboard(direction, selected))
+        _save_progress_background_from_callback(
+            callback,
+            state,
+            status="черновик: анкета в процессе",
+            current_stage="этап 8 — навыки",
+        )
         return
 
     if data == "skill_done":
         await state.set_state(Questionnaire.resume_links)
+        _save_progress_background_from_callback(
+            callback,
+            state,
+            status="черновик: анкета в процессе",
+            current_stage="этап 9 — резюме",
+        )
         await callback.message.answer(
             "9️⃣ Загрузка резюме\n"
             "Отправь PDF/PNG, фото или текстовую ссылку на резюме/портфолио.\n"
@@ -550,6 +740,7 @@ async def process_resume_links(message: Message, state: FSMContext):
         resume_file_id=resume_file_id,
         resume_message_link=resume_message_link,
     )
+    _save_progress_background(message, state, status="черновик: анкета в процессе", current_stage="этап 10 — дополнительная информация")
     await state.set_state(Questionnaire.add_more_decision)
     await message.answer("Хочешь добавить что-то ещё к анкете?", reply_markup=get_yes_no_keyboard("add"))
 
@@ -558,6 +749,8 @@ async def process_resume_links(message: Message, state: FSMContext):
 async def process_add_more_decision(callback: CallbackQuery, state: FSMContext):
     data = callback.data or ""
     if data == "add_yes":
+        if callback.message:
+            _save_progress_background_from_callback(callback, state, status="черновик: анкета в процессе", current_stage="этап 10 — дополнительная информация")
         await state.set_state(Questionnaire.add_more_text)
         await callback.message.answer("Напиши дополнительную информацию одним сообщением.")
         await callback.answer()
@@ -565,6 +758,8 @@ async def process_add_more_decision(callback: CallbackQuery, state: FSMContext):
 
     if data == "add_no":
         await state.update_data(additional_info="")
+        if callback.message:
+            _save_progress_background_from_callback(callback, state, status="черновик: анкета в процессе", current_stage="этап 10 — мини-тест")
         await state.set_state(Questionnaire.test_questions)
         direction = (await state.get_data()).get("direction", "информационные технологии")
         await callback.message.answer(
@@ -581,6 +776,7 @@ async def process_add_more_decision(callback: CallbackQuery, state: FSMContext):
 @router.message(Questionnaire.add_more_text)
 async def process_add_more_text(message: Message, state: FSMContext):
     await state.update_data(additional_info=(message.text or "").strip())
+    _save_progress_background(message, state, status="черновик: анкета в процессе", current_stage="этап 10 — мини-тест")
     await state.set_state(Questionnaire.test_questions)
     direction = (await state.get_data()).get("direction", "информационные технологии")
     await message.answer(
@@ -599,6 +795,8 @@ async def process_test_questions(callback: CallbackQuery, state: FSMContext):
 
     if choice == "test_skip":
         await state.update_data(test_answers="пропущено")
+        if callback.message:
+            _save_progress_background_from_callback(callback, state, status="черновик: анкета в процессе", current_stage="этап 11 — рабочий стиль")
         await state.set_state(Questionnaire.work_style)
         await callback.message.answer(
             "1️⃣1️⃣ Какой у тебя рабочий стиль?\n"
@@ -610,41 +808,61 @@ async def process_test_questions(callback: CallbackQuery, state: FSMContext):
 
     if choice == "test_start":
         await state.update_data(test_questions_pool=questions, test_question_index=0, test_answers=[])
-        await callback.message.answer(f"Вопрос 1/{len(questions)}:\n{questions[0]}\n\nОтветь текстом или напиши «пропустить».")
+        if callback.message:
+            _save_progress_background_from_callback(callback, state, status="черновик: анкета в процессе", current_stage="этап 10 — ответы мини-теста")
+        await callback.message.answer(
+            f"Вопрос 1/{len(questions)}:\n{questions[0]}\n\nОтветь текстом.",
+            reply_markup=get_test_answer_skip_keyboard(0),
+        )
+        await callback.answer()
+        return
+
+    if choice.startswith("test_answer_skip_"):
+        if callback.message:
+            await _process_single_test_answer(callback.message, state, "пропущено")
         await callback.answer()
         return
 
     await callback.answer("Выбери: пройти тест или пропустить", show_alert=True)
 
 
-@router.message(Questionnaire.test_questions)
-async def process_test_answer(message: Message, state: FSMContext):
+async def _process_single_test_answer(message: Message, state: FSMContext, answer_text: str) -> None:
     data = await state.get_data()
     questions = data.get("test_questions_pool")
-    idx = data.get("test_question_index", 0)
+    idx = int(data.get("test_question_index", 0))
     if not questions:
         await message.answer("Нажми кнопку: «Пройти тест» или «Пропустить».", reply_markup=get_test_questions_keyboard())
         return
 
     answers = data.get("test_answers", [])
-    txt = (message.text or "").strip()
-    answer = "пропущено" if txt.lower() in {"пропустить", "skip", "-"} else txt
-    answers.append({"question": questions[idx], "answer": answer})
+    answers.append({"question": questions[idx], "answer": answer_text})
 
     next_idx = idx + 1
     if next_idx < len(questions):
         await state.update_data(test_answers=answers, test_question_index=next_idx)
-        await message.answer(f"Вопрос {next_idx + 1}/{len(questions)}:\n{questions[next_idx]}\n\nОтветь текстом или напиши «пропустить».")
+        _save_progress_background(message, state, status="черновик: анкета в процессе", current_stage="этап 10 — ответы мини-теста")
+        await message.answer(
+            f"Вопрос {next_idx + 1}/{len(questions)}:\n{questions[next_idx]}\n\nОтветь текстом.",
+            reply_markup=get_test_answer_skip_keyboard(next_idx),
+        )
         return
 
     formatted = "\n".join([f"{i + 1}. {item['question']} -> {item['answer']}" for i, item in enumerate(answers)])
     await state.update_data(test_answers=formatted)
+    _save_progress_background(message, state, status="черновик: анкета в процессе", current_stage="этап 11 — рабочий стиль")
     await state.set_state(Questionnaire.work_style)
     await message.answer(
         "1️⃣1️⃣ Какой у тебя рабочий стиль?\n"
         "Если задача сформулирована не до конца, как ты обычно действуешь?",
         reply_markup=get_work_style_keyboard(),
     )
+
+
+@router.message(Questionnaire.test_questions)
+async def process_test_answer(message: Message, state: FSMContext):
+    txt = (message.text or "").strip()
+    answer = "пропущено" if txt.lower() in {"пропустить", "skip", "-"} else txt
+    await _process_single_test_answer(message, state, answer)
 
 
 @router.callback_query(Questionnaire.work_style)
@@ -656,6 +874,8 @@ async def process_work_style(callback: CallbackQuery, state: FSMContext):
 
     await state.update_data(work_style=WORK_STYLE_MAP.get(data[6:], data[6:]))
     await state.update_data(short_assessment_index=0)
+    if callback.message:
+        _save_progress_background_from_callback(callback, state, status="черновик: анкета в процессе", current_stage="этап 11 — кейс тестирования")
     await state.set_state(Questionnaire.short_assessment)
     first = SHORT_ASSESSMENT[0]
     await callback.message.answer(
@@ -679,6 +899,8 @@ async def process_short_assessment(callback: CallbackQuery, state: FSMContext):
     cfg = SHORT_ASSESSMENT[index]
     selected_text = next((text for key, text in cfg["options"] if key == selected_key), "")
     await state.update_data(**{cfg["key"]: selected_text})
+    if callback.message:
+        _save_progress_background_from_callback(callback, state, status="черновик: анкета в процессе", current_stage="этап 11 — кейс тестирования")
 
     next_index = index + 1
     if next_index < len(SHORT_ASSESSMENT):
@@ -693,6 +915,8 @@ async def process_short_assessment(callback: CallbackQuery, state: FSMContext):
 
     await state.set_state(Questionnaire.contacts)
     await state.update_data(contact_step="email")
+    if callback.message:
+        _save_progress_background_from_callback(callback, state, status="черновик: анкета в процессе", current_stage="этап 12 — контакты")
     await callback.message.answer("1️⃣2️⃣ Контакты\nШаг 1/2: укажи email")
     await callback.answer()
 
@@ -708,6 +932,7 @@ async def process_contacts(message: Message, state: FSMContext):
             await message.answer("Некорректный email. Пример: example@mail.com")
             return
         await state.update_data(contact_email=email, contact_step="phone")
+        _save_progress_background(message, state, status="черновик: анкета в процессе", current_stage="этап 12 — контакты (телефон)")
         await message.answer(
             "Шаг 2/2: отправь номер кнопкой ниже или введи вручную в формате +79991234567",
             reply_markup=get_contact_request_keyboard(),
@@ -748,6 +973,7 @@ async def process_contacts(message: Message, state: FSMContext):
             "tg_user_id": message.from_user.id,
             "tg_chat_id": message.chat.id,
             "status": "новая анкета",
+            "current_stage": "анкета заполнена",
         }
     )
 
@@ -758,10 +984,10 @@ async def process_contacts(message: Message, state: FSMContext):
     if isinstance(user_data.get("test_answers"), (list, dict)):
         user_data["test_answers"] = str(user_data["test_answers"])
 
-    candidate_id = save_candidate(user_data)
-    score, tags, level = calculate_score_and_tags(user_data)
-    update_candidate_score(candidate_id, score, tags, level)
-    update_candidate_status(candidate_id, "анкета заполнена")
+    candidate_id = await asyncio.to_thread(save_candidate, user_data)
+    rating, tags, level = calculate_absolute_rating_and_tags(user_data)
+    await asyncio.to_thread(update_candidate_rating, candidate_id, rating, tags, level)
+    await asyncio.to_thread(update_candidate_status, candidate_id, "анкета заполнена")
 
     await message.answer(
         "✅ Спасибо! Анкета сохранена.\n"
@@ -772,10 +998,8 @@ async def process_contacts(message: Message, state: FSMContext):
     await state.clear()
 
 
-def calculate_score_and_tags(data: Dict[str, Any]) -> tuple[int, str, str]:
-    score = 0
-    tags: List[str] = []
-    level = "без опыта"
+def calculate_absolute_rating_and_tags(data: Dict[str, Any]) -> tuple[int, str, str]:
+    rating = 0
 
     skills = data.get("skills", [])
     if isinstance(skills, str):
@@ -802,57 +1026,85 @@ def calculate_score_and_tags(data: Dict[str, Any]) -> tuple[int, str, str]:
         "notion": 8,
         "google docs": 5,
     }
+    max_skill_points = 60
+    skill_total = 0
     for skill in skills:
         key = skill.lower()
         if key in skill_points:
-            score += skill_points[key]
-            tags.append(skill)
+            skill_total += skill_points[key]
+    rating += min(skill_total, max_skill_points)
 
     experience = data.get("experience", "").lower()
-    if "стажировка" in experience or "фриланс" in experience:
-        level = "стажер"
-    elif "коммерческий" in experience or "1-2" in experience:
-        level = "начинающий специалист"
-
     if "стажировка" in experience:
-        score += 15
+        rating += 6
     elif "фриланс" in experience:
-        score += 20
+        rating += 8
     elif "коммерческий" in experience or "1-2" in experience:
-        score += 25
+        rating += 10
     elif "курсы" in experience:
-        score += 10
+        rating += 4
 
     direction = data.get("direction", "").lower()
     if "информационные технологии" in direction:
-        score += 15
-        tags.append("IT")
+        rating += 5
     elif "маркетинг" in direction:
-        score += 10
-        tags.append("Маркетинг")
+        rating += 4
     elif "дизайн" in direction:
-        score += 10
-        tags.append("Дизайн")
+        rating += 4
     elif "аналитика" in direction:
-        score += 12
-        tags.append("Аналитика")
+        rating += 5
     elif "продажи" in direction:
-        score += 8
-        tags.append("Продажи")
+        rating += 4
     elif "клиентская поддержка" in direction:
-        score += 7
-        tags.append("Поддержка")
+        rating += 3
     elif "ассистент" in direction:
-        score += 7
-        tags.append("Ассистент")
+        rating += 3
     elif "операционная деятельность" in direction:
-        score += 8
-        tags.append("Операции")
+        rating += 4
     elif "подбор персонала" in direction:
-        score += 8
-        tags.append("HR")
+        rating += 4
 
-    return score, ",".join(tags), level
+    completeness_fields = [
+        "candidate_name",
+        "age",
+        "who_are_you",
+        "what_are_you_looking_for",
+        "direction",
+        "salary_expectations",
+        "experience",
+        "skills",
+        "resume_links",
+        "contacts",
+        "work_style",
+        "test_answers",
+    ]
+    filled = 0
+    for field in completeness_fields:
+        value = data.get(field)
+        if isinstance(value, list):
+            if value:
+                filled += 1
+        elif isinstance(value, str):
+            if value.strip() and value.strip().lower() not in {"пропущено", "тест пропущен"}:
+                filled += 1
+        elif value not in (None, ""):
+            filled += 1
+
+    completeness_bonus = round((filled / len(completeness_fields)) * 30)
+    rating += completeness_bonus
+
+    test_answers_raw = str(data.get("test_answers", "") or "").lower()
+    if test_answers_raw and test_answers_raw not in {"пропущено", "тест пропущен"}:
+        total_questions = test_answers_raw.count("->")
+        skipped_questions = test_answers_raw.count("-> пропущено")
+        answered_questions = max(0, total_questions - skipped_questions)
+        if total_questions > 0:
+            rating += round((answered_questions / total_questions) * 10)
+        if skipped_questions > 0:
+            rating -= min(5, skipped_questions * 2)
+
+    rating = max(0, min(100, int(rating)))
+    return rating, "", ""
 
 
 @router.message(StateFilter(None), ~F.text.startswith("/"), lambda m: is_greeting_or_generic((m.text or "").strip()))

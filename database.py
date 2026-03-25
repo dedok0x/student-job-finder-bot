@@ -61,10 +61,11 @@ def init_db():
             work_preference TEXT,
             work_start_priority TEXT,
             contacts TEXT,
-            score INTEGER DEFAULT 0,
+            rating INTEGER DEFAULT 0,
             tags TEXT,
             level TEXT,
             status TEXT DEFAULT 'новая анкета',
+            current_stage TEXT,
             clarifying_answers TEXT,
             salary_expectations TEXT,
             additional_info TEXT,
@@ -114,6 +115,19 @@ def init_db():
     _ensure_column(cursor, 'candidates', 'unknown_task_action', 'TEXT')
     _ensure_column(cursor, 'candidates', 'work_preference', 'TEXT')
     _ensure_column(cursor, 'candidates', 'work_start_priority', 'TEXT')
+    _ensure_column(cursor, 'candidates', 'current_stage', 'TEXT')
+    _ensure_column(cursor, 'candidates', 'rating', 'INTEGER DEFAULT 0')
+
+    cursor.execute("PRAGMA table_info(candidates)")
+    existing_columns = {row[1] for row in cursor.fetchall()}
+    if 'score' in existing_columns:
+        cursor.execute(
+            '''
+            UPDATE candidates
+            SET rating = score
+            WHERE (rating IS NULL OR rating = 0) AND score IS NOT NULL
+            '''
+        )
 
     conn.commit()
     conn.close()
@@ -174,7 +188,8 @@ def save_candidate(data: Dict[str, Any]) -> int:
                 salary_expectations = ?,
                 additional_info = ?,
                 status = ?,
-                score = ?,
+                current_stage = ?,
+                rating = ?,
                 tags = ?,
                 level = ?,
                 updated_at = CURRENT_TIMESTAMP
@@ -205,7 +220,8 @@ def save_candidate(data: Dict[str, Any]) -> int:
             data.get('salary_expectations', ''),
             data.get('additional_info', ''),
             data.get('status', 'новая анкета'),
-            data.get('score', 0),
+            data.get('current_stage', ''),
+            data.get('rating', data.get('score', 0)),
             data.get('tags', ''),
             data.get('level', ''),
             candidate_id,
@@ -227,8 +243,8 @@ def save_candidate(data: Dict[str, Any]) -> int:
                 resume_file_id, resume_message_link, test_answers, work_style,
                 multi_task_style, unknown_task_action, work_preference, work_start_priority,
                 contacts,
-                clarifying_answers, salary_expectations, additional_info, status, score, tags, level
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                clarifying_answers, salary_expectations, additional_info, status, current_stage, rating, tags, level
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
             data.get('tg_user_id'),
             data.get('tg_chat_id'),
@@ -257,7 +273,8 @@ def save_candidate(data: Dict[str, Any]) -> int:
             data.get('salary_expectations', ''),
             data.get('additional_info', ''),
             data.get('status', 'новая анкета'),
-            data.get('score', 0),
+            data.get('current_stage', ''),
+            data.get('rating', data.get('score', 0)),
             data.get('tags', ''),
             data.get('level', '')
         ))
@@ -443,22 +460,27 @@ def update_candidate_status(candidate_id: int, new_status: str, notes: str = '')
     conn.close()
     return updated
 
-def update_candidate_score(candidate_id: int, score: int, tags: str, level: str) -> bool:
-    """Update candidate score, tags and level."""
+def update_candidate_rating(candidate_id: int, rating: int, tags: str, level: str) -> bool:
+    """Update candidate rating, tags and level."""
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    
+
     cursor.execute('''
         UPDATE candidates 
-        SET score = ?, tags = ?, level = ?, updated_at = CURRENT_TIMESTAMP 
+        SET rating = ?, tags = ?, level = ?, updated_at = CURRENT_TIMESTAMP 
         WHERE id = ?
-    ''', (score, tags, level, candidate_id))
-    
+    ''', (rating, tags, level, candidate_id))
+
     conn.commit()
     _sync_snapshot_to_sheets(conn)
     updated = cursor.rowcount > 0
     conn.close()
     return updated
+
+
+def update_candidate_score(candidate_id: int, score: int, tags: str, level: str) -> bool:
+    """Backward-compatible wrapper for legacy calls."""
+    return update_candidate_rating(candidate_id, score, tags, level)
 
 def search_candidates(query: str, direction: str = '', status: str = '') -> List[Dict]:
     """Search candidates by various criteria."""
@@ -573,7 +595,7 @@ def get_applications_by_vacancy(vacancy_id: int) -> List[Dict]:
     cursor = conn.cursor()
     
     cursor.execute('''
-        SELECT a.*, c.first_name, c.last_name, c.direction, c.score, c.skills
+        SELECT a.*, c.first_name, c.last_name, c.direction, c.rating, c.skills
         FROM applications a
         JOIN candidates c ON a.candidate_id = c.id
         WHERE a.vacancy_id = ?

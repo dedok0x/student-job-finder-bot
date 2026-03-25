@@ -49,7 +49,7 @@ def get_experience_keyboard() -> InlineKeyboardMarkup:
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-def get_skills_keyboard(direction: str) -> InlineKeyboardMarkup:
+def get_skills_keyboard(direction: str, selected_skills: list[str] | None = None) -> InlineKeyboardMarkup:
     """Return keyboard for skills selection based on direction."""
     # Define skills by direction
     skills_by_direction = {
@@ -91,13 +91,15 @@ def get_skills_keyboard(direction: str) -> InlineKeyboardMarkup:
     
     # Get skills for the selected direction
     skills = skills_by_direction.get(direction, [])
+    selected_set = {item.lower() for item in (selected_skills or [])}
     
     # Create buttons for skills
     buttons = []
     for skill in skills:
         # Преобразуем название навыка в безопасный callback_data
         safe_skill = skill.lower().replace(' ', '_').replace('/', '_').replace('-', '_')
-        buttons.append([InlineKeyboardButton(text=skill, callback_data=f"skill_{safe_skill}")])
+        text = f"✅ {skill}" if skill.lower() in selected_set else skill
+        buttons.append([InlineKeyboardButton(text=text, callback_data=f"skill_{safe_skill}")])
     
     # Add "Готово" button to finish skill selection
     buttons.append([InlineKeyboardButton(text="Готово", callback_data="skill_done")])
@@ -111,6 +113,15 @@ def get_test_questions_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="Пропустить", callback_data="test_skip")]
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def get_test_answer_skip_keyboard(index: int) -> InlineKeyboardMarkup:
+    """Inline keyboard with skip button for the current mini-test question."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Пропустить", callback_data=f"test_answer_skip_{index}")]
+        ]
+    )
 
 def get_work_style_keyboard() -> InlineKeyboardMarkup:
     """Return keyboard for work style selection."""
@@ -137,6 +148,16 @@ def get_yes_no_keyboard(prefix: str = "yn") -> InlineKeyboardMarkup:
         inline_keyboard=[
             [InlineKeyboardButton(text="да", callback_data=f"{prefix}_yes")],
             [InlineKeyboardButton(text="нет", callback_data=f"{prefix}_no")],
+        ]
+    )
+
+
+def get_continue_later_keyboard(prefix: str = "flow") -> InlineKeyboardMarkup:
+    """Keyboard for continue now / fill later decision."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="продолжить", callback_data=f"{prefix}_yes")],
+            [InlineKeyboardButton(text="заполнить позже", callback_data=f"{prefix}_no")],
         ]
     )
 
@@ -172,6 +193,8 @@ def get_manager_panel_keyboard() -> ReplyKeyboardMarkup:
             [KeyboardButton(text="🔎 Поиск по имени")],
             [KeyboardButton(text="📤 Экспорт CSV")],
             [KeyboardButton(text="📄 Открыть Google таблицу")],
+            [KeyboardButton(text="📣 Напомнить недопрошедшим")],
+            [KeyboardButton(text="📢 Сообщение всем пользователям")],
             [KeyboardButton(text="🚪 Выйти из панели менеджера")],
         ],
         resize_keyboard=True,

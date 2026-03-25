@@ -1,0 +1,12 @@
+services:
+  hr_bot:
+    build: .
+    container_name: hr_bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./hr_bot.db:/app/hr_bot.db
+      - ./creds.json:/app/creds.json:ro
+      - ./exports:/app/exports
+    command: ["python", "main.py"]
